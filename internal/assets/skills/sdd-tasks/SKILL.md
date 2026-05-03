@@ -128,9 +128,13 @@ If the estimate is **High** or likely above 400 lines:
 1. Mark `Chained PRs recommended` as `Yes`.
 2. Split tasks into **work units** that can become chained or stacked PRs.
 3. Each suggested PR must have a clear start, clear finish, verification, and autonomous scope.
-4. Set `Decision needed before apply` from delivery strategy:
+4. **Ask the user which chain strategy to use** (this is a team decision):
+   - **Stacked PRs to main** — each PR merges to main in order. Fast iteration, fix on the go. Best for speed-first teams and independent slices.
+   - **Feature Branch Chain** — all PRs merge into a shared branch with a tracker PR. Only the tracker merges to main. Best for rollback control and coordinated releases.
+   - **size:exception** — keep it as a single PR with maintainer approval. Best for generated code, migrations, or vendor diffs.
+5. Cache the user's choice and set `Decision needed before apply` from delivery strategy:
    - `ask-on-risk`: `Yes` — orchestrator asks before apply.
-   - `auto-chain`: `No` — orchestrator proceeds with the first chained/stacked slice.
+   - `auto-chain`: `No` — orchestrator proceeds with the first slice using the chosen chain strategy.
    - `single-pr`: `Yes` — orchestrator must require `size:exception` before apply.
    - `exception-ok`: `No` — maintainer has accepted `size:exception`.
 
@@ -141,6 +145,7 @@ The forecast MUST include these exact plain-text lines so downstream guards can 
 ```text
 Decision needed before apply: Yes|No
 Chained PRs recommended: Yes|No
+Chain strategy: stacked-to-main|feature-branch-chain|size-exception|pending
 400-line budget risk: Low|Medium|High
 ```
 

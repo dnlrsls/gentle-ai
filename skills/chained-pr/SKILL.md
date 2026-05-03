@@ -37,8 +37,8 @@ Do not use this skill for small fixes or single-purpose changes that fit comfort
 | Exceptions | Use `size:exception` only when a maintainer agrees the large diff is unavoidable |
 | SDD handoff | If SDD forecasts a >400-line workload, honor `delivery_strategy`: ask, auto-chain, or require/record `size:exception` |
 | Visual map | Every chained PR MUST include a dependency diagram that marks the current PR |
-| Tracker PR | Every chain SHOULD have a draft tracker PR that lists every child PR and current status |
-| Tracker targeting | If a tracker PR exists, **no child PR may target `main`** — all must flow through the tracker branch |
+| Tracker PR | If the team chooses Feature Branch Chain, create a draft tracker PR that lists every child PR and current status |
+| Strategy consistency | Once the user picks a chain strategy, follow it for the entire chain — do not mix stacked and feature branch patterns |
 
 The goal is not bureaucracy. The goal is preventing reviewer burnout so maintainers can review with care instead of skimming exhausted. Big PRs create fatigue, hide defects, and slow merge velocity.
 
@@ -54,33 +54,38 @@ Each chained PR must function as a complete review unit:
 
 If a slice cannot meet these rules, split it differently. A chain is not a dumping ground for partial, unreviewable diffs.
 
-## Choosing the Split Strategy
+## Choosing the Chain Strategy
 
-Follow this decision tree — first match wins:
+When the workload exceeds 400 lines and chained PRs are needed, **ask the user** before proceeding:
 
 ```
-1. Is there (or will there be) a tracker PR?
-   YES → Feature Branch Chain (mandatory)
-   NO  ↓
+This work exceeds the 400-line review budget. How do you want to split it?
 
-2. Can every slice land in main independently and stay green?
-   YES → Stacked PRs to main
-   NO  → Feature Branch Chain
+1. Stacked PRs to main
+   Each PR merges to main in order. Fast iteration, fix on the go.
+   Best for: speed-first teams, startups, independent slices.
 
-3. Is the diff pure generated/vendor/migration code?
-   YES → Consider size:exception instead of splitting
+2. Feature Branch Chain (with tracker)
+   All PRs merge into a shared branch. Only the tracker merges to main.
+   Best for: rollback control, integration testing before main, coordinated releases.
+
+3. size:exception
+   Keep it as a single PR with maintainer approval.
+   Best for: generated code, migrations, vendor diffs where splitting adds noise.
 ```
 
-**Hard rule:** If a tracker PR exists, every child PR MUST target the tracker branch (or another child branch that eventually flows into it). No child PR may target `main` directly — otherwise the chain bypasses the tracker and lands in `main` before the chain is complete.
+Cache the user's answer for the rest of the session. Do not ask again unless the user changes scope.
 
-| Scenario | Required approach | Why |
-|----------|-------------------|-----|
-| Tracker PR exists | **Feature Branch Chain** | All work must flow through the tracker before `main` |
-| Slices need integration before main | Feature Branch Chain | Keeps incomplete work away from `main` |
-| API and UI are tightly coupled | Feature Branch Chain | Allows integration before final merge |
-| Each slice can land independently, no tracker | Stacked PRs to `main` | Reduces long-lived branch drift |
-| Backend can ship before UI, no tracker | Stacked PRs | Faster incremental value |
-| Pure generated/vendor/migration diff | `size:exception` | Splitting may add noise without reducing review complexity |
+This is a **team decision**, not a technical one. Both strategies are valid — they reflect different priorities:
+
+| | Stacked PRs to main | Feature Branch Chain |
+|---|---|---|
+| Speed | Each slice ships immediately | Waits until the chain is complete |
+| Rollback | Revert individual PRs from main | Revert the whole feature branch |
+| Risk | Partial features may land in main | Nothing lands until everything is ready |
+| Fix flow | Fix on the go in main | Fix on the integration branch |
+| Complexity | Simpler — rebase and retarget | Needs tracker PR and branch management |
+| Best for | Startups, fast-moving teams | Teams needing coordination and control |
 
 ## Chain Boundaries
 
@@ -142,7 +147,7 @@ When SDD planning produces tasks that may exceed 400 changed lines:
 
 ## Feature Branch Chain
 
-Use this when multiple PRs should integrate together before landing in `main`. **Required when a tracker PR exists.**
+Use this when the user chooses option 2: all PRs integrate in a shared branch before landing in `main`.
 
 ```text
 main
@@ -161,12 +166,13 @@ main
 5. Merge child PRs into the feature branch as they pass review.
 6. Only merge the tracker PR into `main` after all children are merged and integrated.
 
-### Anti-pattern: child PR targeting main
+### Common mistake: child PR targeting main
+
+If you chose this strategy, no child PR should target `main` — otherwise it bypasses the tracker and lands in `main` before the chain is complete.
 
 ```text
-# WRONG — child bypasses tracker and lands in main directly
+# WRONG — child bypasses tracker
 main ← #101 (base: main) ← #102 ← #103
-              ↑ this skips the tracker
 
 # CORRECT — all children flow through the tracker branch
 main ← tracker (#105)
@@ -174,8 +180,6 @@ main ← tracker (#105)
          ├── #102 (base: tracker branch)
          └── #103 (base: tracker branch)
 ```
-
-If any child PR has `base: main` while a tracker PR exists, the chain is broken. The child will merge into `main` before the tracker, defeating the purpose of the chain.
 
 ### Tracker PR Expectations
 
