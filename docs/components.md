@@ -70,6 +70,16 @@ gga install
 
 These foundation skills are installed by default with both `full-gentleman` and `ecosystem-only` presets.
 
+### Skill consumption contract
+
+SDD sub-agents use two sources of skill context:
+
+1. **Assigned executor/phase skill** — the sub-agent reads its own SDD skill, such as `sdd-explore/SKILL.md` or `sdd-apply/SKILL.md`, to know how to run that phase.
+2. **Project/user skill standards** — the orchestrator resolves matching project or user skills from the skill registry and injects their compact rules into the sub-agent prompt as `## Project Standards (auto-resolved)`.
+
+During normal runtime, sub-agents should not independently discover or load additional project/user `SKILL.md` files. If the orchestrator fails to inject Project Standards, explicit `fallback-registry` or `fallback-path` loading is degraded self-healing and must be reported in the phase result's `skill_resolution` field.
+
+
 ### Coding Skills (separate repository)
 
 For framework-specific skills (React 19, Angular, TypeScript, Tailwind 4, Zod 4, Playwright, etc.), see [Gentleman-Programming/Gentleman-Skills](https://github.com/Gentleman-Programming/Gentleman-Skills). These are maintained by the community and installed separately by cloning the repo and copying skills to your agent's skills directory.
