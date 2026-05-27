@@ -775,8 +775,8 @@ func TestRunStrategy_ScriptUpgradeSuccess(t *testing.T) {
 	scriptHTTPClient = server.Client()
 
 	// Override installScriptURL to point to our test server.
-	installScriptURLFn = func(owner, repo string) string {
-		return server.URL + "/install.sh"
+	installScriptURLFn = func(owner, repo, version string) (string, error) {
+		return server.URL + "/install.sh", nil
 	}
 
 	var gotScriptContent string
@@ -825,8 +825,8 @@ func TestRunStrategy_ScriptUpgradeDownloadFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	scriptHTTPClient = server.Client()
-	installScriptURLFn = func(owner, repo string) string {
-		return server.URL + "/install.sh"
+	installScriptURLFn = func(owner, repo, version string) (string, error) {
+		return server.URL + "/install.sh", nil
 	}
 
 	r := update.UpdateResult{
@@ -882,9 +882,11 @@ func TestRunStrategy_ScriptUpgradeWindowsManualFallback(t *testing.T) {
 // --- TestGGAScriptUpgradeUsesGitClone ---
 
 // TestGGAScriptUpgradeUsesGitClone verifies that ggaScriptUpgrade:
-// 1. First calls `git clone <repo-url> /tmp/gentleman-guardian-angel`
-// 2. Then calls `bash /tmp/gentleman-guardian-angel/install.sh`
+// 1. First calls `git clone --depth=1 --branch v<version> <repo-url> <tmpDir>`
+// 2. Then calls `bash <path-to-install.sh>`
 // — not `bash -c <script-content>` like the generic scriptUpgrade.
+// The clone is pinned to the target release tag so that install.sh matches the
+// version being upgraded to, not whatever is on main at upgrade time.
 func TestGGAScriptUpgradeUsesGitClone(t *testing.T) {
 	origExecCommand := execCommand
 	origDetectOS := detectOS
@@ -932,17 +934,23 @@ func TestGGAScriptUpgradeUsesGitClone(t *testing.T) {
 	if len(calls[0].args) == 0 || calls[0].args[0] != "clone" {
 		t.Errorf("first exec args[0] = %q, want %q", calls[0].args[0], "clone")
 	}
-	// The clone URL must reference the correct repo.
+	// The clone args must include the target tag via --branch.
 	cloneArgs := calls[0].args
 	foundRepoURL := false
-	for _, a := range cloneArgs {
+	foundTag := false
+	for i, a := range cloneArgs {
 		if containsAny(a, "gentleman-guardian-angel") {
 			foundRepoURL = true
-			break
+		}
+		if a == "--branch" && i+1 < len(cloneArgs) && cloneArgs[i+1] == "v2.8.0" {
+			foundTag = true
 		}
 	}
 	if !foundRepoURL {
 		t.Errorf("git clone args %v should include the repo URL (gentleman-guardian-angel)", cloneArgs)
+	}
+	if !foundTag {
+		t.Errorf("git clone args %v should include --branch v2.8.0 to pin to the release tag", cloneArgs)
 	}
 
 	// Second call must be `bash <path-to-install.sh>` (not bash -c <content>).
@@ -1052,9 +1060,67 @@ func TestRunStrategy_GGAUsesGitClone(t *testing.T) {
 // --- TestInstallScriptURL ---
 
 func TestInstallScriptURL(t *testing.T) {
-	url := installScriptURL("Gentleman-Programming", "gentleman-guardian-angel")
-	if url != "https://raw.githubusercontent.com/Gentleman-Programming/gentleman-guardian-angel/main/install.sh" {
-		t.Errorf("installScriptURL = %q, want correct raw GitHub URL", url)
+	tests := []struct {
+		name        string
+		owner       string
+		repo        string
+		version     string
+		wantURL     string
+		wantErr     bool
+		wantContain string
+	}{
+		{
+			name:        "pins to release tag",
+			owner:       "Gentleman-Programming",
+			repo:        "gentleman-guardian-angel",
+			version:     "1.31.0",
+			wantURL:     "https://raw.githubusercontent.com/Gentleman-Programming/gentleman-guardian-angel/v1.31.0/install.sh",
+			wantContain: "v1.31.0",
+		},
+		{
+			name:    "empty version returns error",
+			owner:   "Gentleman-Programming",
+			repo:    "gentle-ai",
+			version: "",
+			wantErr: true,
+		},
+		{
+			name:    "whitespace-only version returns error",
+			owner:   "Gentleman-Programming",
+			repo:    "gentle-ai",
+			version: "   ",
+			wantErr: true,
+		},
+		{
+			name:        "does not reference main",
+			owner:       "Gentleman-Programming",
+			repo:        "gentle-ai",
+			version:     "2.0.0",
+			wantContain: "v2.0.0",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			url, err := installScriptURL(tc.owner, tc.repo, tc.version)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("installScriptURL(%q, %q, %q): want error, got nil (url=%q)", tc.owner, tc.repo, tc.version, url)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("installScriptURL(%q, %q, %q): unexpected error: %v", tc.owner, tc.repo, tc.version, err)
+			}
+			if tc.wantURL != "" && url != tc.wantURL {
+				t.Errorf("installScriptURL = %q, want %q", url, tc.wantURL)
+			}
+			if tc.wantContain != "" && !containsAny(url, tc.wantContain) {
+				t.Errorf("installScriptURL = %q, want it to contain %q", url, tc.wantContain)
+			}
+			if containsAny(url, "/main/") {
+				t.Errorf("installScriptURL = %q must NOT reference /main/", url)
+			}
+		})
 	}
 }
 
@@ -1174,8 +1240,8 @@ func TestRunStrategy_ScriptUpgradeExecFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	scriptHTTPClient = server.Client()
-	installScriptURLFn = func(owner, repo string) string {
-		return server.URL + "/install.sh"
+	installScriptURLFn = func(owner, repo, version string) (string, error) {
+		return server.URL + "/install.sh", nil
 	}
 
 	execCommand = func(name string, args ...string) *exec.Cmd {
