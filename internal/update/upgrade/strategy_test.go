@@ -266,6 +266,31 @@ func TestEffectiveMethod(t *testing.T) {
 			profile: system.PlatformProfile{PackageManager: "brew"},
 			want:    update.InstallOpenCodePlugin,
 		},
+		// Auto-detect order: brew → go-install → binary (issue #246).
+		{
+			name:    "auto-detect: brew available → brew wins regardless of GoImportPath",
+			tool:    update.ToolInfo{Name: "mytool", InstallMethod: update.InstallBinary, GoImportPath: "github.com/example/mytool/cmd/mytool"},
+			profile: system.PlatformProfile{PackageManager: "brew", GoAvailable: true},
+			want:    update.InstallBrew,
+		},
+		{
+			name:    "auto-detect: brew missing + go available + GoImportPath set → go-install",
+			tool:    update.ToolInfo{Name: "mytool", InstallMethod: update.InstallBinary, GoImportPath: "github.com/example/mytool/cmd/mytool"},
+			profile: system.PlatformProfile{PackageManager: "apt", GoAvailable: true},
+			want:    update.InstallGoInstall,
+		},
+		{
+			name:    "auto-detect: brew missing + go missing + GoImportPath set → binary fallback",
+			tool:    update.ToolInfo{Name: "mytool", InstallMethod: update.InstallBinary, GoImportPath: "github.com/example/mytool/cmd/mytool"},
+			profile: system.PlatformProfile{PackageManager: "apt", GoAvailable: false},
+			want:    update.InstallBinary,
+		},
+		{
+			name:    "auto-detect: go available but GoImportPath empty → binary (no upgrade)",
+			tool:    update.ToolInfo{Name: "mytool", InstallMethod: update.InstallBinary, GoImportPath: ""},
+			profile: system.PlatformProfile{PackageManager: "apt", GoAvailable: true},
+			want:    update.InstallBinary,
+		},
 	}
 
 	for _, tc := range tests {
