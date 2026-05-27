@@ -280,6 +280,8 @@ func uniqueExistingDirs(dirs []string) []string {
 }
 
 func parseFrontmatter(source string) (name, description, body string) {
+	source = strings.ReplaceAll(source, "\r\n", "\n")
+	source = strings.ReplaceAll(source, "\r", "\n")
 	if !strings.HasPrefix(source, "---\n") {
 		return "", "", source
 	}

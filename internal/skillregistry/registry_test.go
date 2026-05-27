@@ -351,6 +351,51 @@ name: go-testing
 	}
 }
 
+func TestParseFrontmatterHandlesCRLF(t *testing.T) {
+	cases := []struct {
+		name     string
+		source   string
+		wantName string
+		wantDesc string
+	}{
+		{
+			name:     "LF baseline",
+			source:   "---\nname: demo\ndescription: ok\n---\n\nBody.\n",
+			wantName: "demo",
+			wantDesc: "ok",
+		},
+		{
+			name:     "CRLF Windows",
+			source:   "---\r\nname: demo\r\ndescription: ok\r\n---\r\n\r\nBody.\r\n",
+			wantName: "demo",
+			wantDesc: "ok",
+		},
+		{
+			name:     "bare CR (legacy Mac)",
+			source:   "---\rname: demo\rdescription: ok\r---\r\rBody.\r",
+			wantName: "demo",
+			wantDesc: "ok",
+		},
+		{
+			name:     "mixed CRLF + LF",
+			source:   "---\r\nname: demo\ndescription: ok\r\n---\n",
+			wantName: "demo",
+			wantDesc: "ok",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotName, gotDesc, _ := parseFrontmatter(tc.source)
+			if gotName != tc.wantName {
+				t.Errorf("name = %q, want %q", gotName, tc.wantName)
+			}
+			if gotDesc != tc.wantDesc {
+				t.Errorf("description = %q, want %q", gotDesc, tc.wantDesc)
+			}
+		})
+	}
+}
+
 func writeSkill(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
