@@ -307,8 +307,9 @@ func LoadConfigProviders(path string) (map[string]ConfigProvider, error) {
 
 // MergeCustomProviders merges custom providers from opencode.json into the cache-loaded
 // providers map. Custom models use the tool_call value from opencode.json, defaulting to false
-// when omitted. Cache models win on ID collision. Returns the original providers map unchanged
-// when config is empty; otherwise returns a merged copy without mutating the input.
+// when omitted. Custom entries win on ID collision (user-managed beats cached catalog).
+// Returns the original providers map unchanged when config is empty; otherwise returns a
+// merged copy without mutating the input.
 func MergeCustomProviders(providers map[string]Provider, config map[string]ConfigProvider) map[string]Provider {
 	if len(config) == 0 {
 		return providers
@@ -325,7 +326,7 @@ func MergeCustomProviders(providers map[string]Provider, config map[string]Confi
 
 	for id, cp := range config {
 		// Provider-level collision: when a provider ID already exists in the cache,
-		// we keep the cache's Name/Env and only merge in the config's models below.
+		// we keep the cache's Name/Env and merge in the config's models below.
 		// The config's provider Name is silently ignored in that case.
 		existing, ok := merged[id]
 		if !ok {
@@ -335,13 +336,12 @@ func MergeCustomProviders(providers map[string]Provider, config map[string]Confi
 			existing.Models = make(map[string]Model, len(cp.Models))
 		}
 		for mid, cm := range cp.Models {
-			if _, exists := existing.Models[mid]; !exists {
-				name := cm.Name
-				if name == "" {
-					name = mid
-				}
-				existing.Models[mid] = Model{ID: mid, Name: name, ToolCall: cm.ToolCall}
+			// Custom entry wins on model ID collision (user-managed beats cached catalog).
+			name := cm.Name
+			if name == "" {
+				name = mid
 			}
+			existing.Models[mid] = Model{ID: mid, Name: name, ToolCall: cm.ToolCall}
 		}
 		merged[id] = existing
 	}

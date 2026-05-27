@@ -1,6 +1,8 @@
 package screens
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -942,4 +944,182 @@ func TestIndividualPhaseSelectionDoesNotSetAllPhasesModel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ─── NewModelPickerState: custom provider merging ─────────────────────────────
+
+// catalogJSON is a minimal OpenCode models cache with one built-in provider.
+const catalogJSON = `{
+  "built-in": {
+    "id": "built-in",
+    "name": "Built-In Provider",
+    "env": ["BUILTIN_API_KEY"],
+    "models": {
+      "builtin-model": {
+        "id": "builtin-model",
+        "name": "Built-In Model",
+        "tool_call": true
+      }
+    }
+  }
+}`
+
+// writeTempFile writes content to a file in a temp dir and returns the path.
+func writeTempFile(t *testing.T, name, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write temp file %q: %v", path, err)
+	}
+	return path
+}
+
+func TestNewModelPickerState(t *testing.T) {
+	tests := []struct {
+		name              string
+		cacheContent      string   // non-empty means write a cache file; empty means skip
+		settingsContent   string   // non-empty means write settings file; empty means use missing path
+		wantProviderIDs   []string // provider IDs that must appear in Providers map
+		wantAvailable     int      // minimum number of AvailableIDs (custom providers always count)
+		wantConfigWarning bool     // whether ConfigWarning must be non-empty
+	}{
+		{
+			name:            "missing opencode.json falls back to catalog only",
+			cacheContent:    catalogJSON,
+			settingsContent: "", // no file written → path points to nonexistent file
+			wantProviderIDs: []string{"built-in"},
+			wantAvailable:   0, // no env var set → built-in not available; just checking providers map
+			wantConfigWarning: false,
+		},
+		{
+			name:            "opencode.json with no provider key gives catalog only",
+			cacheContent:    catalogJSON,
+			settingsContent: `{"agent": {}}`,
+			wantProviderIDs: []string{"built-in"},
+			wantAvailable:   0,
+			wantConfigWarning: false,
+		},
+		{
+			name:         "opencode.json with 2 custom providers adds both to picker",
+			cacheContent: catalogJSON,
+			settingsContent: `{
+				"provider": {
+					"custom-a": {
+						"name": "Custom A",
+						"models": {"model-a1": {"name": "Model A1", "tool_call": true}}
+					},
+					"custom-b": {
+						"name": "Custom B",
+						"models": {"model-b1": {"name": "Model B1", "tool_call": true}}
+					}
+				}
+			}`,
+			wantProviderIDs: []string{"built-in", "custom-a", "custom-b"},
+			wantAvailable:   2, // custom-a and custom-b are always available as custom providers
+			wantConfigWarning: false,
+		},
+		{
+			name:         "name collision: custom provider wins over catalog",
+			cacheContent: catalogJSON,
+			settingsContent: `{
+				"provider": {
+					"built-in": {
+						"name": "My Override",
+						"models": {
+							"builtin-model": {"name": "Custom Override Name", "tool_call": true}
+						}
+					}
+				}
+			}`,
+			wantProviderIDs: []string{"built-in"},
+			wantAvailable:   1, // "built-in" now treated as custom → always available
+			wantConfigWarning: false,
+		},
+		{
+			name:            "malformed opencode.json produces config warning",
+			cacheContent:    catalogJSON,
+			settingsContent: `{"provider":`, // truncated / invalid JSON
+			wantProviderIDs: []string{"built-in"},
+			wantAvailable:   0,
+			wantConfigWarning: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Write the cache file.
+			cachePath := writeTempFile(t, "models.json", tt.cacheContent)
+
+			// Determine settings path — missing when settingsContent is empty.
+			var settingsPath string
+			if tt.settingsContent != "" {
+				settingsPath = writeTempFile(t, "opencode.json", tt.settingsContent)
+			} else {
+				settingsPath = filepath.Join(t.TempDir(), "nonexistent.json")
+			}
+
+			state := NewModelPickerState(cachePath, settingsPath)
+
+			// All expected provider IDs must appear in the Providers map.
+			for _, id := range tt.wantProviderIDs {
+				if _, ok := state.Providers[id]; !ok {
+					t.Errorf("Providers missing %q; got keys: %v", id, providerKeys(state.Providers))
+				}
+			}
+
+			// AvailableIDs count must meet the minimum.
+			if len(state.AvailableIDs) < tt.wantAvailable {
+				t.Errorf("AvailableIDs = %v (count %d), want at least %d",
+					state.AvailableIDs, len(state.AvailableIDs), tt.wantAvailable)
+			}
+
+			// ConfigWarning check.
+			if tt.wantConfigWarning && state.ConfigWarning == "" {
+				t.Error("expected ConfigWarning to be set, got empty string")
+			}
+			if !tt.wantConfigWarning && state.ConfigWarning != "" {
+				t.Errorf("expected no ConfigWarning, got %q", state.ConfigWarning)
+			}
+		})
+	}
+}
+
+// TestNewModelPickerStateCollisionCustomWins verifies that when a model ID exists
+// in both the catalog cache and opencode.json, the custom entry takes precedence.
+func TestNewModelPickerStateCollisionCustomWins(t *testing.T) {
+	cachePath := writeTempFile(t, "models.json", catalogJSON)
+	settingsPath := writeTempFile(t, "opencode.json", `{
+		"provider": {
+			"built-in": {
+				"name": "Built-In Provider",
+				"models": {
+					"builtin-model": {"name": "Custom Override Name", "tool_call": true}
+				}
+			}
+		}
+	}`)
+
+	state := NewModelPickerState(cachePath, settingsPath)
+
+	p, ok := state.Providers["built-in"]
+	if !ok {
+		t.Fatal("expected built-in provider in state")
+	}
+	m, ok := p.Models["builtin-model"]
+	if !ok {
+		t.Fatal("expected builtin-model in built-in provider")
+	}
+	if m.Name != "Custom Override Name" {
+		t.Errorf("model name = %q, want %q (custom should win on collision)", m.Name, "Custom Override Name")
+	}
+}
+
+// providerKeys returns the keys of a Provider map for test error messages.
+func providerKeys(providers map[string]opencode.Provider) []string {
+	keys := make([]string, 0, len(providers))
+	for k := range providers {
+		keys = append(keys, k)
+	}
+	return keys
 }
