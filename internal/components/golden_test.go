@@ -304,8 +304,8 @@ func TestGoldenSDD_Codex(t *testing.T) {
 		t.Fatalf("sdd.Inject(codex) changed = false")
 	}
 
-	// Codex writes SDD orchestrator to ~/.codex/agents.md.
-	agentsMD := readTestFile(t, filepath.Join(home, ".codex", "agents.md"))
+	// Codex writes SDD orchestrator to ~/.codex/AGENTS.md.
+	agentsMD := readTestFile(t, filepath.Join(home, ".codex", "AGENTS.md"))
 	assertGolden(t, "sdd-codex-agentsmd.golden", agentsMD)
 
 	// Golden-check a representative SDD skill file.

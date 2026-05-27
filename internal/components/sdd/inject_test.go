@@ -3460,8 +3460,8 @@ func TestInjectCodexWritesSDDOrchestratorAndSkills(t *testing.T) {
 		t.Fatal("Inject(codex) changed = false")
 	}
 
-	// Verify SDD orchestrator was injected into agents.md.
-	promptPath := filepath.Join(home, ".codex", "agents.md")
+	// Verify SDD orchestrator was injected into AGENTS.md.
+	promptPath := filepath.Join(home, ".codex", "AGENTS.md")
 	content, readErr := os.ReadFile(promptPath)
 	if readErr != nil {
 		t.Fatalf("ReadFile(%q) error = %v", promptPath, readErr)
