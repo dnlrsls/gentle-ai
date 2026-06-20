@@ -238,6 +238,22 @@ func withPostInstallNotes(report verify.Report, resolved planner.ResolvedPlan) v
 		report.FinalNote = report.FinalNote + "\n\nGGA is now installed globally. To enable project hooks, run in each repo:\n- gga init\n- gga install"
 	}
 	report = withGoInstallPathNote(report, resolved)
+	report = withOpenCodeExperimentalNote(report, resolved)
+	return report
+}
+
+// withOpenCodeExperimentalNote appends guidance to enable OpenCode
+// experimental features, but only when OpenCode is among the selected agents.
+// It only prints copy-paste guidance — it never writes to the user's shell
+// config — mirroring the engram PATH guidance pattern.
+func withOpenCodeExperimentalNote(report verify.Report, resolved planner.ResolvedPlan) verify.Report {
+	if !containsAgent(resolved.Agents, model.AgentOpenCode) {
+		return report
+	}
+	report.FinalNote = report.FinalNote + fmt.Sprintf(
+		"\n\nTo enable OpenCode experimental features, add this to your shell:\n  %s",
+		openCodeExperimentalGuidance(os.Getenv("SHELL")),
+	)
 	return report
 }
 
@@ -1474,6 +1490,23 @@ func engramPathGuidance(shellPath string) string {
 		return fmt.Sprintf("echo 'export PATH=\"%s:$PATH\"' >> ~/.bashrc && source ~/.bashrc", binDir)
 	}
 	return fmt.Sprintf("Add %s to your shell PATH and restart the terminal.", binDir)
+}
+
+// openCodeExperimentalGuidance returns shell-aware copy-paste guidance to
+// persist OPENCODE_EXPERIMENTAL=true. It only produces a command string and
+// never writes to the user's shell config files.
+func openCodeExperimentalGuidance(shellPath string) string {
+	if strings.Contains(shellPath, "fish") {
+		return "set -Ux OPENCODE_EXPERIMENTAL true"
+	}
+	if strings.Contains(shellPath, "zsh") {
+		return "echo 'export OPENCODE_EXPERIMENTAL=true' >> ~/.zshrc && source ~/.zshrc"
+	}
+	if strings.Contains(shellPath, "bash") {
+		return "echo 'export OPENCODE_EXPERIMENTAL=true' >> ~/.bashrc && source ~/.bashrc"
+	}
+	return "Set the OPENCODE_EXPERIMENTAL=true environment variable " +
+		"(on Windows PowerShell: [Environment]::SetEnvironmentVariable('OPENCODE_EXPERIMENTAL','true','User'))."
 }
 
 // checkDependenciesStep verifies that required system dependencies are present.
