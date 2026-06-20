@@ -79,7 +79,7 @@ func runStrategy(ctx context.Context, r update.UpdateResult, profile system.Plat
 	case update.InstallBinary:
 		return false, binaryUpgrade(ctx, r, profile)
 	case update.InstallInstaller:
-		return installerUpgrade(ctx, r.Tool, r.ReleaseURL)
+		return installerUpgrade(ctx, r.Tool, r.ReleaseURL, isBetaGentleAIUpgrade(r))
 	case update.InstallScript:
 		// GGA's install.sh expects to run from within a cloned repo — it references
 		// $SCRIPT_DIR/bin/gga and $SCRIPT_DIR/lib/*.sh. The generic scriptUpgrade
@@ -503,10 +503,33 @@ func binaryUpgrade(ctx context.Context, r update.UpdateResult, profile system.Pl
 	return downloadAndReplace(ctx, r, profile)
 }
 
+// installerUpgradeArgs builds the PowerShell command argument list for launching
+// install.ps1 as a detached process. When beta is true, "-Channel beta" is
+// appended after "-File <tmpPath>" so install.ps1 routes to go install @main
+// instead of downloading the latest stable release binary.
+func installerUpgradeArgs(tmpPath string, beta bool) []string {
+	args := []string{
+		"/C",
+		"start",
+		"",
+		"powershell",
+		"-NoProfile",
+		"-NoExit",
+		"-ExecutionPolicy", "Bypass",
+		"-File", tmpPath,
+	}
+	if beta {
+		args = append(args, "-Channel", "beta")
+	}
+	return args
+}
+
 // installerUpgrade launches the PowerShell installer (install.ps1) for gentle-ai on Windows.
 // This is used for the Windows self-replace workaround — the running process
 // exits immediately after launching the installer, which then replaces the binary.
-func installerUpgrade(ctx context.Context, tool update.ToolInfo, releaseURL string) (bool, error) {
+// When beta is true, "-Channel beta" is passed to install.ps1 so it installs
+// from HEAD via go install @main instead of downloading the latest stable release.
+func installerUpgrade(ctx context.Context, tool update.ToolInfo, releaseURL string, beta bool) (bool, error) {
 	if runtime.GOOS != "windows" {
 		return false, fmt.Errorf("installer upgrade is only supported on Windows")
 	}
@@ -547,17 +570,7 @@ func installerUpgrade(ctx context.Context, tool update.ToolInfo, releaseURL stri
 	}
 	tmpFile.Close()
 
-	cmd := execCommand(
-		"cmd",
-		"/C",
-		"start",
-		"",
-		"powershell",
-		"-NoProfile",
-		"-NoExit",
-		"-ExecutionPolicy", "Bypass",
-		"-File", tmpFile.Name(),
-	)
+	cmd := execCommand("cmd", installerUpgradeArgs(tmpFile.Name(), beta)...)
 
 	fmt.Printf("\nLaunching installer for %s...\n", tool.Name)
 	fmt.Println("gentle-ai will now exit so the installer can replace the binary.")

@@ -269,10 +269,11 @@ function Install-ViaBinary {
                 }
             }
         } catch {
+            $reason = $_.Exception.Message
             if ($Insecure) {
-                Write-Warn "Could not download checksums.txt - checksum verification skipped (-Insecure)"
+                Write-Warn ("Could not download checksums.txt from: {0} - {1} - checksum verification skipped (-Insecure)" -f $checksumsUrl, $reason)
             } else {
-                Stop-WithError "Could not download checksums.txt from: $checksumsUrl`nRefusing to install without integrity verification.`nUse -Insecure to skip (not recommended)."
+                Stop-WithError ("Could not download checksums.txt from: {0}`nError: {1}`nRefusing to install without integrity verification.`nUse -Insecure to skip (not recommended)." -f $checksumsUrl, $reason)
             }
         }
 

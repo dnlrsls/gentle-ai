@@ -115,10 +115,14 @@ func TestHandleCodexModelPickerNav_SelectsPreset(t *testing.T) {
 
 func TestHandleCodexModelPickerNav_BackRow(t *testing.T) {
 	state := screens.NewCodexModelPickerState()
-	// Back row is at index 4 (3 presets + 1 Custom = index 4)
+	// Back row is at index 4 (3 presets + 1 Custom = index 4).
+	// The back row must NOT be handled here: it returns (false, nil) so the
+	// parent navigation (confirmSelection / goBack) performs the screen
+	// transition, matching the Claude picker's back-row contract. Returning
+	// (true, nil) would be swallowed by model.go and leave Back inert.
 	handled, assignments := screens.HandleCodexModelPickerNav("enter", &state, 4)
-	if !handled {
-		t.Error("HandleCodexModelPickerNav(enter, Back) handled = false, want true")
+	if handled {
+		t.Error("HandleCodexModelPickerNav(enter, Back) handled = true, want false")
 	}
 	if assignments != nil {
 		t.Errorf("HandleCodexModelPickerNav(enter, Back) assignments = %v, want nil", assignments)

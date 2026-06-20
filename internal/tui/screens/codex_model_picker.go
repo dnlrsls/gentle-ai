@@ -183,10 +183,14 @@ func HandleCodexModelPickerNav(
 		return false, nil
 	}
 
-	// Back row: last row after presets + Custom.
+	// Back row: last row after presets + Custom. Return not-handled so the
+	// parent navigation (confirmSelection / goBack) performs the screen
+	// transition, matching the Claude picker's back-row behavior. Returning
+	// (true, nil) here would be swallowed by model.go, which only navigates
+	// when assignments are non-nil — leaving the Back row inert.
 	backIdx := len(codexPresetOrder) + 1
 	if cursor >= backIdx {
-		return true, nil
+		return false, nil
 	}
 
 	// Custom row: index len(codexPresetOrder) = 3.

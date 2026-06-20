@@ -1480,6 +1480,222 @@ func TestRunStrategy_ScriptUpgradeExecFailure(t *testing.T) {
 	}
 }
 
+// --- TestInstallerUpgradeArgs ---
+
+// TestInstallerUpgradeArgs verifies that installerUpgradeArgs builds the correct
+// PowerShell command-line argument list for both stable and beta gentle-ai upgrades.
+// This is a pure function test — no OS gate needed.
+func TestInstallerUpgradeArgs(t *testing.T) {
+	const tmpPath = `C:\Users\user\AppData\Local\Temp\gentle-ai-install-12345.ps1`
+
+	tests := []struct {
+		name          string
+		beta          bool
+		wantContains  []string
+		wantAbsent    []string
+	}{
+		{
+			name: "stable upgrade does not include -Channel beta",
+			beta: false,
+			wantContains: []string{
+				"-NoProfile",
+				"-NoExit",
+				"-ExecutionPolicy", "Bypass",
+				"-File", tmpPath,
+			},
+			wantAbsent: []string{"-Channel", "beta"},
+		},
+		{
+			name: "beta upgrade includes -Channel beta after -File",
+			beta: true,
+			wantContains: []string{
+				"-NoProfile",
+				"-NoExit",
+				"-ExecutionPolicy", "Bypass",
+				"-File", tmpPath,
+				"-Channel", "beta",
+			},
+			wantAbsent: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := installerUpgradeArgs(tmpPath, tc.beta)
+
+			for _, want := range tc.wantContains {
+				found := false
+				for _, a := range args {
+					if a == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("installerUpgradeArgs(beta=%v): args %v missing expected %q", tc.beta, args, want)
+				}
+			}
+
+			for _, absent := range tc.wantAbsent {
+				for _, a := range args {
+					if a == absent {
+						t.Errorf("installerUpgradeArgs(beta=%v): args %v must NOT contain %q", tc.beta, args, absent)
+					}
+				}
+			}
+
+			// For beta, assert -Channel beta appears AFTER -File tmpPath.
+			if tc.beta {
+				fileIdx := -1
+				channelIdx := -1
+				for i, a := range args {
+					if a == "-File" {
+						fileIdx = i
+					}
+					if a == "-Channel" {
+						channelIdx = i
+					}
+				}
+				if fileIdx < 0 {
+					t.Fatal("beta args: -File not found")
+				}
+				if channelIdx < 0 {
+					t.Fatal("beta args: -Channel not found")
+				}
+				if channelIdx <= fileIdx {
+					t.Errorf("beta args: -Channel (idx=%d) must come after -File (idx=%d); args: %v", channelIdx, fileIdx, args)
+				}
+				// Confirm the value after -Channel is "beta".
+				if channelIdx+1 >= len(args) || args[channelIdx+1] != "beta" {
+					t.Errorf("beta args: arg after -Channel must be %q, got args[%d]=%q; args: %v", "beta", channelIdx+1, args[channelIdx+1], args)
+				}
+			}
+		})
+	}
+}
+
+// TestRunStrategy_BetaGentleAIWindowsInstallerIncludesChannelBeta verifies the
+// full runStrategy path: on Windows, a beta gentle-ai upgrade via InstallInstaller
+// must pass -Channel beta to the PowerShell installer command.
+// Because installerUpgrade calls runtime.GOOS and skips on non-Windows, this
+// test verifies the behavior indirectly by asserting on the captured execCommand
+// args, which is only reachable on Windows. On non-Windows, the test is skipped.
+func TestRunStrategy_BetaGentleAIWindowsInstallerIncludesChannelBeta(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("skipping Windows-only installer beta channel test on non-windows platform")
+	}
+
+	origExecCommand := execCommand
+	origHTTPClient := scriptHTTPClient
+	t.Cleanup(func() {
+		execCommand = origExecCommand
+		scriptHTTPClient = origHTTPClient
+	})
+
+	scriptHTTPClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			rec := httptest.NewRecorder()
+			rec.Header().Set("Content-Type", "text/plain")
+			rec.WriteHeader(http.StatusOK)
+			rec.WriteString("Write-Output 'installer ok'\n")
+			return rec.Result(), nil
+		}),
+	}
+
+	var gotArgs []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		gotArgs = append([]string(nil), args...)
+		return mockCmd("echo", "ok")
+	}
+
+	r := update.UpdateResult{
+		Tool: update.ToolInfo{
+			Name:          "gentle-ai",
+			Owner:         "Gentleman-Programming",
+			Repo:          "gentle-ai",
+			InstallMethod: update.InstallInstaller,
+		},
+		LatestVersion: "main@abc1234",
+		Status:        update.UpdateAvailable,
+	}
+	profile := system.PlatformProfile{OS: "windows", PackageManager: "winget", Supported: true}
+
+	_, err := runStrategy(context.Background(), r, profile)
+	if err != nil {
+		t.Fatalf("runStrategy beta gentle-ai windows: unexpected error: %v", err)
+	}
+
+	// Verify -Channel beta is in the args passed to powershell.
+	foundChannel := false
+	for i, a := range gotArgs {
+		if a == "-Channel" && i+1 < len(gotArgs) && gotArgs[i+1] == "beta" {
+			foundChannel = true
+			break
+		}
+	}
+	if !foundChannel {
+		t.Errorf("runStrategy beta gentle-ai on Windows: execCommand args %v must include -Channel beta", gotArgs)
+	}
+}
+
+// TestRunStrategy_StableGentleAIWindowsInstallerExcludesChannelBeta verifies that
+// a stable (non-beta) gentle-ai upgrade on Windows does NOT pass -Channel beta.
+func TestRunStrategy_StableGentleAIWindowsInstallerExcludesChannelBeta(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("skipping Windows-only installer stable channel test on non-windows platform")
+	}
+
+	origExecCommand := execCommand
+	origHTTPClient := scriptHTTPClient
+	t.Cleanup(func() {
+		execCommand = origExecCommand
+		scriptHTTPClient = origHTTPClient
+	})
+
+	scriptHTTPClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			rec := httptest.NewRecorder()
+			rec.Header().Set("Content-Type", "text/plain")
+			rec.WriteHeader(http.StatusOK)
+			rec.WriteString("Write-Output 'installer ok'\n")
+			return rec.Result(), nil
+		}),
+	}
+
+	var gotArgs []string
+	execCommand = func(name string, args ...string) *exec.Cmd {
+		gotArgs = append([]string(nil), args...)
+		return mockCmd("echo", "ok")
+	}
+
+	r := update.UpdateResult{
+		Tool: update.ToolInfo{
+			Name:          "gentle-ai",
+			Owner:         "Gentleman-Programming",
+			Repo:          "gentle-ai",
+			InstallMethod: update.InstallInstaller,
+		},
+		LatestVersion: "1.40.2",
+		Status:        update.UpdateAvailable,
+	}
+	profile := system.PlatformProfile{OS: "windows", PackageManager: "winget", Supported: true}
+
+	_, err := runStrategy(context.Background(), r, profile)
+	if err != nil {
+		t.Fatalf("runStrategy stable gentle-ai windows: unexpected error: %v", err)
+	}
+
+	for i, a := range gotArgs {
+		if a == "-Channel" {
+			val := ""
+			if i+1 < len(gotArgs) {
+				val = gotArgs[i+1]
+			}
+			t.Errorf("runStrategy stable gentle-ai on Windows: execCommand args must NOT include -Channel, got -Channel %q; all args: %v", val, gotArgs)
+		}
+	}
+}
+
 // --- TestInstallerUpgrade_Success ---
 
 func TestInstallerUpgrade_Success(t *testing.T) {
@@ -1533,7 +1749,7 @@ func TestInstallerUpgrade_Success(t *testing.T) {
 		return rec.Result(), nil
 	})
 
-	exitReq, err := installerUpgrade(context.Background(), tool, "")
+	exitReq, err := installerUpgrade(context.Background(), tool, "", false)
 	if err != nil {
 		t.Fatalf("installerUpgrade: unexpected error: %v", err)
 	}
@@ -1587,7 +1803,7 @@ func TestInstallerUpgrade_DownloadFailure(t *testing.T) {
 		InstallMethod: update.InstallInstaller,
 	}
 
-	exitReq, err := installerUpgrade(context.Background(), tool, "")
+	exitReq, err := installerUpgrade(context.Background(), tool, "", false)
 	if err == nil {
 		t.Errorf("expected error when installer download fails, got nil")
 	}
@@ -1603,7 +1819,7 @@ func TestInstallerUpgrade_NonWindows(t *testing.T) {
 		t.Skip("skipping non-Windows test on Windows platform")
 	}
 	tool := update.ToolInfo{Name: "gentle-ai"}
-	exitReq, err := installerUpgrade(context.Background(), tool, "")
+	exitReq, err := installerUpgrade(context.Background(), tool, "", false)
 	if err == nil {
 		t.Errorf("expected error when calling installerUpgrade on non-windows, got nil")
 	}

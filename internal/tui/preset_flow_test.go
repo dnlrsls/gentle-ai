@@ -378,6 +378,113 @@ func TestInstallNavigationRoundTrips(t *testing.T) {
 			forwardScreens: []Screen{ScreenReview},
 			reverseScreens: []Screen{ScreenDependencyTree},
 		},
+		{
+			// Full picker chain, SDD single mode (no model picker). This is the
+			// scenario that exercises every model-picker back edge in one run:
+			// Claude → Kiro → Codex → SDDMode and the full reverse. It is the
+			// coverage that would have caught the Codex back-navigation bugs
+			// (Codex Back row inert + SDDMode back skipping Codex).
+			name: "all picker agents SDD single round-trips through every picker",
+			setup: func(t *testing.T) Model {
+				m := NewModel(system.DetectionResult{}, "dev")
+				m.Screen = ScreenPreset
+				m.Selection.Agents = []model.AgentID{
+					model.AgentClaudeCode,
+					model.AgentKiroIDE,
+					model.AgentCodex,
+					model.AgentOpenCode,
+				}
+				m.Cursor = presetCursor(t, model.PresetFullGentleman)
+				return m
+			},
+			forwardActions: []flowAction{
+				{key: tea.KeyMsg{Type: tea.KeyEnter}},                                                       // Preset → Claude picker
+				{key: tea.KeyMsg{Type: tea.KeyEnter}},                                                       // Claude preset → Kiro picker
+				{key: tea.KeyMsg{Type: tea.KeyEnter}},                                                       // Kiro preset → Codex picker
+				{key: tea.KeyMsg{Type: tea.KeyEnter}},                                                       // Codex preset → SDDMode
+				{key: tea.KeyMsg{Type: tea.KeyEnter}},                                                       // SDDMode single → StrictTDD
+				{key: tea.KeyMsg{Type: tea.KeyEnter}},                                                       // StrictTDD → OpenCodePlugins
+				{key: tea.KeyMsg{Type: tea.KeyEnter}, cursor: continuePluginsCursor, setCursor: true},       // OpenCodePlugins → DependencyTree
+			},
+			forwardScreens: []Screen{
+				ScreenClaudeModelPicker,
+				ScreenKiroModelPicker,
+				ScreenCodexModelPicker,
+				ScreenSDDMode,
+				ScreenStrictTDD,
+				ScreenOpenCodePlugins,
+				ScreenDependencyTree,
+			},
+			reverseScreens: []Screen{
+				ScreenOpenCodePlugins,
+				ScreenStrictTDD,
+				ScreenSDDMode,
+				ScreenCodexModelPicker, // regression: SDDMode back must hit Codex, not skip to Claude
+				ScreenKiroModelPicker,
+				ScreenClaudeModelPicker,
+				ScreenPreset,
+			},
+		},
+		{
+			// Same full picker chain but SDD multi mode, so the OpenCode model
+			// picker sits between SDDMode and StrictTDD. Confirms the model
+			// picker edge composes with the Claude/Kiro/Codex picker chain in
+			// both directions.
+			name: "all picker agents SDD multi round-trips through every picker and model picker",
+			setup: func(t *testing.T) Model {
+				withModelCache(t)
+				m := NewModel(system.DetectionResult{}, "dev")
+				m.Screen = ScreenPreset
+				m.Selection.Agents = []model.AgentID{
+					model.AgentClaudeCode,
+					model.AgentKiroIDE,
+					model.AgentCodex,
+					model.AgentOpenCode,
+				}
+				m.Cursor = presetCursor(t, model.PresetFullGentleman)
+				return m
+			},
+			forwardActions: []flowAction{
+				{key: tea.KeyMsg{Type: tea.KeyEnter}},                                                 // Preset → Claude picker
+				{key: tea.KeyMsg{Type: tea.KeyEnter}},                                                 // Claude preset → Kiro picker
+				{key: tea.KeyMsg{Type: tea.KeyEnter}},                                                 // Kiro preset → Codex picker
+				{key: tea.KeyMsg{Type: tea.KeyEnter}},                                                 // Codex preset → SDDMode
+				{key: tea.KeyMsg{Type: tea.KeyEnter}, cursor: sddMultiCursor(t), setCursor: true},     // SDDMode multi → ModelPicker
+				{
+					key:       tea.KeyMsg{Type: tea.KeyEnter},
+					cursor:    len(screens.ModelPickerRows()),
+					setCursor: true,
+					prepare: func(state Model) Model {
+						// Force the picker into row+Continue mode deterministically;
+						// CI may lack a real OpenCode provider cache.
+						state.ModelPicker.AvailableIDs = []string{"opencode"}
+						return state
+					},
+				}, // ModelPicker Continue → StrictTDD
+				{key: tea.KeyMsg{Type: tea.KeyEnter}},                                                 // StrictTDD → OpenCodePlugins
+				{key: tea.KeyMsg{Type: tea.KeyEnter}, cursor: continuePluginsCursor, setCursor: true}, // OpenCodePlugins → DependencyTree
+			},
+			forwardScreens: []Screen{
+				ScreenClaudeModelPicker,
+				ScreenKiroModelPicker,
+				ScreenCodexModelPicker,
+				ScreenSDDMode,
+				ScreenModelPicker,
+				ScreenStrictTDD,
+				ScreenOpenCodePlugins,
+				ScreenDependencyTree,
+			},
+			reverseScreens: []Screen{
+				ScreenOpenCodePlugins,
+				ScreenStrictTDD,
+				ScreenModelPicker,
+				ScreenSDDMode,
+				ScreenCodexModelPicker, // regression: SDDMode back must hit Codex, not skip to Claude
+				ScreenKiroModelPicker,
+				ScreenClaudeModelPicker,
+				ScreenPreset,
+			},
+		},
 	}
 
 	for _, tt := range tests {

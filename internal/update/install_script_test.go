@@ -179,3 +179,52 @@ func TestWindowsInstallScriptBetaGoInstallPreservesGoProxyBypassEnv(t *testing.T
 		}
 	}
 }
+
+// TestWindowsInstallScriptChecksumCatchSurfacesRealError verifies that the catch
+// block around checksum download in install.ps1 includes the real exception message
+// ($_.Exception.Message) so the user sees the underlying cause, not a generic
+// "Could not download checksums.txt" message that hides connection errors,
+// TLS failures, etc. The secure-by-default behavior (Stop-WithError when not
+// -Insecure) must be preserved.
+func TestWindowsInstallScriptChecksumCatchSurfacesRealError(t *testing.T) {
+	path := filepath.Join("..", "..", "scripts", "install.ps1")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+
+	script := string(content)
+
+	// The catch block must surface the real error via $_.Exception.Message.
+	if !strings.Contains(script, "$_.Exception.Message") {
+		t.Error("scripts/install.ps1 checksum catch block must include $_.Exception.Message to surface the real error; currently hides root cause")
+	}
+
+	// The catch block must still include the checksum URL so the user knows what failed.
+	if !strings.Contains(script, "$checksumsUrl") {
+		t.Error("scripts/install.ps1 checksum catch block must reference $checksumsUrl in the error message")
+	}
+
+	// The insecure skip path must still exist in the catch block.
+	if !strings.Contains(script, "checksum verification skipped") {
+		t.Error("scripts/install.ps1 checksum catch block must retain the -Insecure skip message")
+	}
+
+	// The secure-by-default path must still call Stop-WithError (hard failure).
+	// Locate the catch block and confirm Stop-WithError is present.
+	catchIdx := strings.Index(script, "} catch {")
+	if catchIdx < 0 {
+		t.Fatal("scripts/install.ps1 missing catch block around checksum download")
+	}
+	catchBlock := script[catchIdx:]
+	// Find the closing brace of the catch block (next standalone "}" at indent 0 relative to catch).
+	closeIdx := strings.Index(catchBlock, "\n        }")
+	if closeIdx < 0 {
+		t.Fatal("scripts/install.ps1 could not locate end of catch block")
+	}
+	catchBody := catchBlock[:closeIdx]
+
+	if !strings.Contains(catchBody, "Stop-WithError") {
+		t.Error("scripts/install.ps1 catch block must call Stop-WithError when not -Insecure; secure-by-default behavior must not be changed")
+	}
+}
