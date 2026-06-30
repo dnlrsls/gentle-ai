@@ -699,7 +699,7 @@ func TestCodeGraphGuidanceSyncStepRepairsCodexConfigOnlyGuidance(t *testing.T) {
 		return "/bin/codegraph", nil
 	}
 
-	if !shouldRefreshCodeGraphGuidance(home) {
+	if !shouldHandleCodeGraphGuidance(home) {
 		t.Fatal("sync should plan CodeGraph guidance repair when Codex has CodeGraph MCP config but no managed guidance")
 	}
 
@@ -743,7 +743,7 @@ func TestCodeGraphGuidanceSyncStepCleansLegacyBlockWithoutCodeGraphCLI(t *testin
 	t.Cleanup(func() { cmdLookPath = restoreLookPath })
 	cmdLookPath = func(string) (string, error) { return "", os.ErrNotExist }
 
-	if !shouldRefreshCodeGraphGuidance(home) {
+	if !shouldHandleCodeGraphGuidance(home) {
 		t.Fatal("sync should plan legacy CodeGraph cleanup even when the CodeGraph CLI is unavailable")
 	}
 

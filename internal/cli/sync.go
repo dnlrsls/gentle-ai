@@ -438,7 +438,7 @@ func (r *syncRuntime) stagePlan() pipeline.StagePlan {
 		})
 	}
 
-	if shouldRefreshCodeGraphGuidance(r.homeDir) {
+	if shouldHandleCodeGraphGuidance(r.homeDir) {
 		apply = append(apply, codeGraphGuidanceSyncStep{
 			id:           "sync:community-tool:codegraph-guidance",
 			homeDir:      r.homeDir,
@@ -449,7 +449,9 @@ func (r *syncRuntime) stagePlan() pipeline.StagePlan {
 	return pipeline.StagePlan{Prepare: prepare, Apply: apply}
 }
 
-func shouldRefreshCodeGraphGuidance(homeDir string) bool {
+// shouldHandleCodeGraphGuidance gates both managed CodeGraph guidance refresh
+// and cleanup of legacy guidance blocks left by older installers.
+func shouldHandleCodeGraphGuidance(homeDir string) bool {
 	return communitytool.HasConfiguredCodeGraph(homeDir, communitytool.DetectorFunc(cmdLookPath)) ||
 		communitytool.HasLegacyCodeGraphGuidance(homeDir)
 }
@@ -465,7 +467,7 @@ func syncBackupTargets(homeDir, workspaceDir string, selection model.Selection, 
 			paths[path] = struct{}{}
 		}
 	}
-	if shouldRefreshCodeGraphGuidance(homeDir) {
+	if shouldHandleCodeGraphGuidance(homeDir) {
 		for _, path := range communitytool.CodeGraphGuidancePaths(homeDir) {
 			paths[path] = struct{}{}
 		}
@@ -693,6 +695,7 @@ func (s componentSyncStep) Run() error {
 				StrictTDD:                          s.selection.StrictTDD,
 				PreserveOpenCodeOrchestratorPrompt: profileStrategy == model.SDDProfileStrategyExternalSingleActive,
 				Profiles:                           profiles,
+				CodeGraphGuidanceMarkdown:          codeGraphGuidanceMarkdownForSDD(s.homeDir, nil),
 			}
 			res, err := sdd.Inject(targetDir, adapter, sddMode, opts)
 			if err != nil {

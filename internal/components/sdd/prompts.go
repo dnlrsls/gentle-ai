@@ -2,6 +2,7 @@ package sdd
 
 import (
 	"path/filepath"
+	"strings"
 
 	"github.com/gentleman-programming/gentle-ai/internal/assets"
 	"github.com/gentleman-programming/gentle-ai/internal/components/filemerge"
@@ -43,9 +44,13 @@ func SharedPromptPhases() []string {
 // Returns (true, nil) if any file was created or changed, (false, nil) if all
 // files already match (idempotent). Uses WriteFileAtomic so the operation is
 // safe to repeat.
-func WriteSharedPromptFiles(homeDir string, phaseCapabilities map[string]string) (bool, error) {
+func WriteSharedPromptFiles(homeDir string, phaseCapabilities map[string]string, codeGraphGuidance ...string) (bool, error) {
 	promptDir := SharedPromptDir(homeDir)
 	anyChanged := false
+	guidance := ""
+	if len(codeGraphGuidance) > 0 {
+		guidance = codeGraphGuidance[0]
+	}
 
 	for _, phase := range subAgentPhaseOrder {
 		// Read the embedded skill content for this phase.
@@ -66,6 +71,7 @@ func WriteSharedPromptFiles(homeDir string, phaseCapabilities map[string]string)
 		// if no matching section marker is found — correct behavior for phases
 		// that don't yet have conditional sections).
 		content := extractModelSection(skillContent, capability)
+		content = injectCodeGraphGuidanceIntoPrompt(content, guidance)
 
 		path := filepath.Join(promptDir, phase+".md")
 		result, err := filemerge.WriteFileAtomic(path, []byte(content), 0o644)
@@ -79,4 +85,38 @@ func WriteSharedPromptFiles(homeDir string, phaseCapabilities map[string]string)
 	}
 
 	return anyChanged, nil
+}
+
+func injectCodeGraphGuidanceIntoPrompt(prompt, guidance string) string {
+	if strings.TrimSpace(guidance) == "" {
+		return prompt
+	}
+	return filemerge.InjectMarkdownSection(prompt, "codegraph-guidance", guidance)
+}
+
+func isMarkdownSubAgentPromptFile(fileName string) bool {
+	if filepath.Ext(fileName) != ".md" {
+		return false
+	}
+	return !strings.HasPrefix(filepath.Base(fileName), ".")
+}
+
+func injectCodeGraphGuidanceIntoOpenCodeSubagentPrompts(agentMap map[string]any, guidance string) {
+	if strings.TrimSpace(guidance) == "" {
+		return
+	}
+	for _, agentRaw := range agentMap {
+		agent, ok := agentRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if mode, _ := agent["mode"].(string); mode == "primary" {
+			continue
+		}
+		prompt, ok := agent["prompt"].(string)
+		if !ok || strings.HasPrefix(prompt, "{file:") {
+			continue
+		}
+		agent["prompt"] = injectCodeGraphGuidanceIntoPrompt(prompt, guidance)
+	}
 }

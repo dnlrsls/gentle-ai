@@ -260,9 +260,13 @@ func extractModelFromAgent(agentMap map[string]any) model.ModelAssignment {
 //     sub-agent references and model assignments table), permissions scoped to *-{name}
 //   - sdd-{phase}-{name} (10 agents): subagent mode, hidden, file reference to
 //     the shared prompt at SharedPromptDir(homeDir)/sdd-{phase}.md
-func GenerateProfileOverlay(profile model.Profile, homeDir string) ([]byte, error) {
+func GenerateProfileOverlay(profile model.Profile, homeDir string, codeGraphGuidance ...string) ([]byte, error) {
 	if profile.Name == "" || profile.Name == "default" {
 		return nil, fmt.Errorf("GenerateProfileOverlay: profile name must be non-empty and not 'default'")
+	}
+	guidance := ""
+	if len(codeGraphGuidance) > 0 {
+		guidance = codeGraphGuidance[0]
 	}
 
 	suffix := "-" + profile.Name
@@ -393,6 +397,8 @@ func GenerateProfileOverlay(profile model.Profile, homeDir string) ([]byte, erro
 		}
 		agentMap[key] = entry
 	}
+
+	injectCodeGraphGuidanceIntoOpenCodeSubagentPrompts(agentMap, guidance)
 
 	overlay := map[string]any{
 		"agent": agentMap,

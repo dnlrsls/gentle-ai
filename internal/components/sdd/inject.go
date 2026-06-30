@@ -60,6 +60,11 @@ type InjectOptions struct {
 	// (no section extraction, full content written).
 	Capability string
 
+	// CodeGraphGuidanceMarkdown is the shared CodeGraph search-order guidance to
+	// inject into SDD phase sub-agent prompts. Empty means disabled; normal SDD
+	// installs must leave it empty unless the Community Tool path enabled CodeGraph.
+	CodeGraphGuidanceMarkdown string
+
 	// triggerRulesContent is an internal field set by step 1c in Inject()
 	// for OpenCode/Kilocode adapters. It holds the rendered trigger-rules
 	// block so inlineOpenCodeSDDPrompts can append it to the gentle-orchestrator
@@ -453,14 +458,14 @@ func Inject(homeDir string, adapter agents.Adapter, sddMode model.SDDModeID, opt
 						}
 					}
 				}
-				promptsChanged, promptsErr := WriteSharedPromptFiles(homeDir, phaseCapabilities)
+				promptsChanged, promptsErr := WriteSharedPromptFiles(homeDir, phaseCapabilities, opts.CodeGraphGuidanceMarkdown)
 				if promptsErr != nil {
 					return InjectionResult{}, fmt.Errorf("write shared SDD prompt files: %w", promptsErr)
 				}
 				changed = changed || promptsChanged
 			}
 
-			overlayBytes, err = inlineOpenCodeSDDPrompts(overlayBytes, homeDir, settingsPath, opts.PreserveOpenCodeOrchestratorPrompt, opts.triggerRulesContent)
+			overlayBytes, err = inlineOpenCodeSDDPrompts(overlayBytes, homeDir, settingsPath, opts.PreserveOpenCodeOrchestratorPrompt, opts.triggerRulesContent, opts.CodeGraphGuidanceMarkdown)
 			if err != nil {
 				return InjectionResult{}, fmt.Errorf("inline OpenCode SDD prompts: %w", err)
 			}
@@ -523,7 +528,7 @@ func Inject(homeDir string, adapter agents.Adapter, sddMode model.SDDModeID, opt
 					return InjectionResult{}, fmt.Errorf("clean stale profile JD agents %q: %w", profile.Name, cleanupErr)
 				}
 				changed = changed || cleanupResult.Changed
-				profileOverlay, profileErr := GenerateProfileOverlay(profile, homeDir)
+				profileOverlay, profileErr := GenerateProfileOverlay(profile, homeDir, opts.CodeGraphGuidanceMarkdown)
 				if profileErr != nil {
 					return InjectionResult{}, fmt.Errorf("generate profile overlay %q: %w", profile.Name, profileErr)
 				}
@@ -694,6 +699,10 @@ func Inject(homeDir string, adapter agents.Adapter, sddMode model.SDDModeID, opt
 				contentStr = strings.ReplaceAll(contentStr, "{{CLAUDE_MODEL}}", cmr.ClaudeModelID(assignment.Model))
 				contentStr = injectClaudeEffortFrontmatter(contentStr, assignment)
 			}
+
+			if isMarkdownSubAgentPromptFile(entry.Name()) {
+				contentStr = injectCodeGraphGuidanceIntoPrompt(contentStr, opts.CodeGraphGuidanceMarkdown)
+			}
 			outPath := filepath.Join(agentsDir, entry.Name())
 			writeResult, err := filemerge.WriteFileAtomic(outPath, []byte(contentStr), 0o644)
 			if err != nil {
@@ -823,7 +832,7 @@ func validateOpenClawWorkspacePath(workspaceDir string, adapter agents.Adapter) 
 	return nil
 }
 
-func inlineOpenCodeSDDPrompts(overlayBytes []byte, homeDir, settingsPath string, preserveExistingOrchestratorPrompt bool, triggerRulesContent string) ([]byte, error) {
+func inlineOpenCodeSDDPrompts(overlayBytes []byte, homeDir, settingsPath string, preserveExistingOrchestratorPrompt bool, triggerRulesContent string, codeGraphGuidance string) ([]byte, error) {
 	var overlay map[string]any
 	if err := json.Unmarshal(overlayBytes, &overlay); err != nil {
 		return nil, fmt.Errorf("unmarshal OpenCode SDD overlay: %w", err)
@@ -902,6 +911,13 @@ func inlineOpenCodeSDDPrompts(overlayBytes []byte, homeDir, settingsPath string,
 			}
 		}
 	}
+
+	// Single-mode SDD embeds sub-agent prompts directly in opencode.json instead
+	// of using shared prompt files. Multi-mode still keeps JD/review prompts inline.
+	// When CodeGraph is enabled through the Community Tool path, every sub-agent
+	// needs the same search-order rule the orchestrator gets; task artifact
+	// references alone are not enough.
+	injectCodeGraphGuidanceIntoOpenCodeSubagentPrompts(agentsMap, codeGraphGuidance)
 
 	result, err := json.MarshalIndent(overlay, "", "  ")
 	if err != nil {
