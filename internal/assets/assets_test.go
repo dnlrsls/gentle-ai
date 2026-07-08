@@ -824,17 +824,33 @@ func TestPlatformNativeSDDOrchestratorsAvoidOpenCodePersistenceClaims(t *testing
 }
 
 func TestGentlemanLanguageInstructionsDoNotBiasEnglishSessions(t *testing.T) {
-	personaPaths := []string{
-		"claude/persona-gentleman.md",
-		"generic/persona-gentleman.md",
-		"kiro/persona-gentleman.md",
-		"kimi/persona-gentleman.md",
-		"opencode/persona-gentleman.md",
+	// Claude and Kimi have an active output-style channel — their persona
+	// section is a residual and no longer carries language content on its
+	// own; the guardrail contract must be evaluated over the COMBINED
+	// persona-residual + output-style channel (design.md Decision 1;
+	// spec.md "Generic Neutral Asset Parity" applies the same combined-channel
+	// principle to Gentleman here).
+	personaPaths := []struct {
+		path           string
+		combineWith    string // "" when the persona file alone still carries language content
+		languagePhrase string // exact per-path phrase asserting the "match current language" guardrail
+	}{
+		// Claude/Kimi no longer carry "REPLY ONLY" in the persona residual —
+		// their combined channel exposes the output style's own Language
+		// Rules opener instead (JD-019).
+		{path: "claude/persona-gentleman.md", combineWith: "claude/output-style-gentleman.md", languagePhrase: "Always match the user's current language in your reply."},
+		{path: "generic/persona-gentleman.md", languagePhrase: "Match the user's current language in your REPLY ONLY"},
+		{path: "kiro/persona-gentleman.md", languagePhrase: "Match the user's current language in your REPLY ONLY"},
+		{path: "kimi/persona-gentleman.md", combineWith: "kimi/output-style-gentleman.md", languagePhrase: "Always match the user's current language in your reply."},
+		{path: "opencode/persona-gentleman.md", languagePhrase: "Match the user's current language in your REPLY ONLY"},
 	}
 
-	for _, path := range personaPaths {
-		t.Run(path, func(t *testing.T) {
-			content := MustRead(path)
+	for _, tc := range personaPaths {
+		t.Run(tc.path, func(t *testing.T) {
+			content := MustRead(tc.path)
+			if tc.combineWith != "" {
+				content += "\n" + MustRead(tc.combineWith)
+			}
 
 			for _, banned := range []string{
 				`Say "déjame verificar"`,
@@ -842,17 +858,17 @@ func TestGentlemanLanguageInstructionsDoNotBiasEnglishSessions(t *testing.T) {
 				`English input → same warm energy:`,
 			} {
 				if strings.Contains(content, banned) {
-					t.Fatalf("%s still contains language-biasing phrase %q", path, banned)
+					t.Fatalf("%s (combined=%q) still contains language-biasing phrase %q", tc.path, tc.combineWith, banned)
 				}
 			}
 
 			for _, required := range []string{
-				"Match the user's current language in your REPLY ONLY",
+				tc.languagePhrase,
 				"Do not switch languages unless the user does, asks you to, or you are quoting/translating content.",
-				"When replying to the user in English, keep the full reply in natural English with the same warm energy.",
+				"keep the full reply in natural English with the same warm energy",
 			} {
 				if !strings.Contains(content, required) {
-					t.Fatalf("%s missing language guardrail %q", path, required)
+					t.Fatalf("%s (combined=%q) missing language guardrail %q", tc.path, tc.combineWith, required)
 				}
 			}
 		})
@@ -878,7 +894,8 @@ func TestGentlemanLanguageInstructionsDoNotBiasEnglishSessions(t *testing.T) {
 			for _, required := range []string{
 				"Always match the user's current language",
 				"Do not drift into another language because of persona wording, examples, or stylistic momentum.",
-				"keep the full response in English unless the user explicitly asks for another language or you are translating/quoting",
+				// Decision 4/JD-013: merged bullet replaces the old verbatim wording.
+				"keep the full reply in natural English with the same warm energy",
 			} {
 				if !strings.Contains(content, required) {
 					t.Fatalf("%s missing output-style guardrail %q", path, required)
@@ -995,7 +1012,10 @@ func TestClaudeManagedOutputStylesAnchorReplyLanguageToLatestUserRequest(t *test
 }
 
 func TestClaudeGentlemanPersonaPreventsEnglishGreetingCodeSwitching(t *testing.T) {
-	content := MustRead("claude/persona-gentleman.md")
+	// Claude's persona section is a residual (Decision 1) — the code-switching
+	// guardrail contract now lives in the output style; evaluate the combined
+	// channel, not the persona file in isolation.
+	content := MustRead("claude/persona-gentleman.md") + "\n" + MustRead("claude/output-style-gentleman.md")
 
 	for _, required := range []string{
 		"If the selected reply language is English, every part of the direct reply must be English: greetings, interjections, acknowledgements, transition phrases, and the first sentence.",

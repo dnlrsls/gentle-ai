@@ -399,6 +399,23 @@ func TestStripLegacyPersonaBlock_AllFingerprintsPreMarker_Strips(t *testing.T) {
 	}
 }
 
+func TestStripLegacyPersonaBlock_SlimResidualInstallNotFalselyStripped(t *testing.T) {
+	// A slim (post-canonical-channel) install's pre-marker zone never contains
+	// "## Personality" or "Senior Architect" — those live only in the output
+	// style now. Only "## Rules" (and the "Persona Voice" pointer) remain in
+	// the residual marker section. With 2 of 3 fingerprints permanently
+	// missing, this must NEVER be falsely stripped as legacy content.
+	preMarker := "## Rules\n\n- Never add \"Co-Authored-By\" or AI attribution to commits.\n\n"
+	markerSection := "<!-- gentle-ai:persona -->\n## Persona Voice\n\nSee the active output style.\n<!-- /gentle-ai:persona -->\n"
+
+	input := preMarker + markerSection
+	result := StripLegacyPersonaBlock(input)
+
+	if result != input {
+		t.Fatalf("slim residual install: expected unchanged result (missing 2/3 fingerprints):\ngot:  %q\nwant: %q", result, input)
+	}
+}
+
 func TestStripLegacyPersonaBlock_EmptyFileReturnsSame(t *testing.T) {
 	result := StripLegacyPersonaBlock("")
 	if result != "" {

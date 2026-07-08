@@ -104,6 +104,41 @@ func TestRemoveManagedPersonaPreamble_WithoutMarkerDoesNotDeleteContent(t *testi
 	}
 }
 
+func TestRemoveMarkdownSections_RemovesSlimResidualPersonaViaMarkerNotFingerprint(t *testing.T) {
+	// A slim (post-canonical-channel) persona section no longer contains
+	// "## Personality" or "Senior Architect" — only "## Rules" and the
+	// "Persona Voice" pointer survive inside the markers. Removal must go
+	// through the marker path (removeMarkdownSections), not the fingerprint
+	// prefix check, so a slim on-disk install is still fully removed on
+	// uninstall even though it can never match all three legacy fingerprints.
+	input := strings.Join([]string{
+		"# User Intro",
+		"",
+		"<!-- gentle-ai:persona -->",
+		"## Rules",
+		"",
+		`- Never add "Co-Authored-By" or AI attribution to commits.`,
+		"",
+		"## Persona Voice",
+		"",
+		"Your conversational tone is defined by the active output style.",
+		"<!-- /gentle-ai:persona -->",
+		"",
+		"# User Footer",
+	}, "\n") + "\n"
+
+	updated, changed := removeMarkdownSections(input, "persona")
+	if !changed {
+		t.Fatal("removeMarkdownSections() changed = false, want true for slim residual persona section")
+	}
+	if strings.Contains(updated, "gentle-ai:persona") {
+		t.Fatalf("slim residual persona marker section still present:\n%s", updated)
+	}
+	if !strings.Contains(updated, "# User Intro") || !strings.Contains(updated, "# User Footer") {
+		t.Fatalf("user content was lost during slim residual persona removal:\n%s", updated)
+	}
+}
+
 func TestRemoveJSONPaths_RemovesOnlyManagedKeys(t *testing.T) {
 	input := []byte(`{
   "theme": "gentleman-kanagawa",

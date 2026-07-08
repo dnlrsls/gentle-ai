@@ -511,6 +511,11 @@ func TestGoldenPersona_Claude_Neutral(t *testing.T) {
 
 	claudeMD := readTestFile(t, filepath.Join(home, ".claude", "CLAUDE.md"))
 	assertGolden(t, "persona-claude-neutral.golden", claudeMD)
+
+	// Locks the reconciled Neutral output style (Decision 4) — no golden
+	// existed for this file before the canonical-channel change.
+	outputStyle := readTestFile(t, filepath.Join(home, ".claude", "output-styles", "neutral.md"))
+	assertGolden(t, "persona-claude-neutral-outputstyle.golden", outputStyle)
 }
 
 func TestGoldenPersona_OpenCode_Gentleman(t *testing.T) {

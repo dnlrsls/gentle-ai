@@ -76,7 +76,7 @@ func injectInternal(homeDir string, adapter agents.Adapter, persona model.Person
 	files := make([]string, 0, 3)
 	changed := false
 
-	content := personaContent(adapter.Agent(), persona)
+	content := personaContent(adapter.Agent(), persona, residualChannel(adapter))
 	if content == "" {
 		return InjectionResult{}, nil
 	}
@@ -492,22 +492,69 @@ func isGentlemanConversationPersona(persona model.PersonaID) bool {
 	return persona == model.PersonaGentleman || persona == model.PersonaGentlemanNeutralArtifacts
 }
 
-func personaContent(agent model.AgentID, persona model.PersonaID) string {
+// residualChannel reports whether the adapter already delivers tone/language/
+// philosophy content through an active output-style channel that loads every
+// session, making the system-prompt persona section redundant for that
+// content. Claude Code is gated on SupportsOutputStyles(); Kimi is an explicit
+// carve-out because its KIMI.md unconditionally double-includes both the
+// persona.md and output-style.md Jinja modules regardless of that capability
+// flag (see design.md Decision 1).
+func residualChannel(adapter agents.Adapter) bool {
+	return adapter.SupportsOutputStyles() || adapter.Agent() == model.AgentKimi
+}
+
+// personaContent returns the persona asset for the given agent and persona.
+//
+// For PersonaNeutral, dispatch genuinely follows the residual flag: when
+// residual is true, Claude/Kimi receive the tone-free "-neutral-residual.md"
+// asset instead of the shared generic/persona-neutral.md — tone/language/
+// philosophy is served exclusively by the output style in that case
+// (design.md Decision 1).
+//
+// For PersonaGentleman this is NOT flag-driven (JD-020): claude/persona-
+// gentleman.md and kimi/persona-gentleman.md were slimmed to the residual
+// block IN PLACE (Decision 3) rather than split into separate full/residual
+// files, so the switch below returns the same (already-slim) asset path for
+// Claude/Kimi regardless of the residual argument's value. This is safe only
+// because residualChannel() evaluates true unconditionally for both
+// adapters today — Claude's SupportsOutputStyles() is hardcoded `true`
+// (claude/adapter.go:119-121) and Kimi is an explicit hardcoded carve-out in
+// residualChannel() (kimi/adapter.go:180-182 hardcodes SupportsOutputStyles
+// `false`, so residualChannel relies on the AgentKimi check instead). If
+// either capability ever became conditional/configurable, calling
+// personaContent(Claude|Kimi, Gentleman, false) would still return the slim
+// residual asset with no full-Gentleman fallback to serve — a latent
+// content-loss trap. See TestPersonaContentGentlemanResidualIgnoredForClaudeAndKimi
+// for a test that pins and documents this exact trap.
+func personaContent(agent model.AgentID, persona model.PersonaID, residual bool) string {
 	switch persona {
 	case model.PersonaNeutral:
 		// Per-agent neutral selection: Hermes uses its own neutral asset with
 		// the skill-loading block rewritten for ~/.hermes/skills/ (Decision 5).
+		// Claude and Kimi receive a residual (tone-free) neutral asset when
+		// residual is true — the output style is their canonical tone source.
 		// All other agents receive the byte-identical generic/persona-neutral.md.
-		switch agent {
-		case model.AgentHermes:
+		if agent == model.AgentHermes {
 			return assets.MustRead("hermes/persona-neutral.md")
-		default:
-			return assets.MustRead("generic/persona-neutral.md")
 		}
+		if residual {
+			switch agent {
+			case model.AgentClaudeCode:
+				return assets.MustRead("claude/persona-neutral-residual.md")
+			case model.AgentKimi:
+				return assets.MustRead("kimi/persona-neutral-residual.md")
+			}
+		}
+		return assets.MustRead("generic/persona-neutral.md")
 	case model.PersonaCustom:
 		return ""
 	default:
-		// Gentleman persona — try agent-specific asset, then generic fallback.
+		// Gentleman persona: claude/persona-gentleman.md and
+		// kimi/persona-gentleman.md are slimmed to the residual block in place
+		// (Decision 3, Tables A/B) — there is no separate "-residual" file for
+		// Gentleman, unlike Neutral. Claude and Kimi always evaluate residual
+		// true in practice (their output-style channel is unconditional), so
+		// the same asset path serves both the residual and dispatch case.
 		switch agent {
 		case model.AgentClaudeCode:
 			return assets.MustRead("claude/persona-gentleman.md")
