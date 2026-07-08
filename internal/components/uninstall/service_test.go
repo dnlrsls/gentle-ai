@@ -11,6 +11,7 @@ import (
 
 	"github.com/gentleman-programming/gentle-ai/internal/agents"
 	"github.com/gentleman-programming/gentle-ai/internal/backup"
+	"github.com/gentleman-programming/gentle-ai/internal/components/engram"
 	"github.com/gentleman-programming/gentle-ai/internal/model"
 )
 
@@ -673,6 +674,77 @@ func TestComponentOperationsEngram_GlobalScopeKeepsWorkspaceProjectData(t *testi
 	}
 	if strings.Contains(string(raw), `"engram"`) {
 		t.Fatalf("global engram config should be removed in global scope, got: %s", string(raw))
+	}
+}
+
+// TestComponentOperationsEngram_CodexRemovesConsolidatedProtocolAssetsWithNoOrphans
+// is the task 2.9 regression assertion: the canonical-asset consolidation
+// (design.md Decision 3) renamed/removed the SOURCE assets
+// (internal/assets/claude/engram-protocol.md, codex/engram-instructions.md,
+// codex/engram-compact-prompt.md -> internal/assets/engram/protocol.md), but
+// the WRITTEN on-disk paths for Codex (~/.codex/engram-instructions.md,
+// ~/.codex/engram-compact-prompt.md) MUST stay byte-identical so the
+// uninstaller keeps covering them with no orphaned files left behind.
+func TestComponentOperationsEngram_CodexRemovesConsolidatedProtocolAssetsWithNoOrphans(t *testing.T) {
+	homeDir := t.TempDir()
+	workspaceDir := t.TempDir()
+
+	svc, err := NewService(homeDir, workspaceDir, "dev")
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	adapter, ok := svc.registry.Get(model.AgentCodex)
+	if !ok {
+		t.Fatal("codex adapter not found in registry")
+	}
+
+	// Actually write the files via the real (post-consolidation) engram
+	// injector, instead of hand-crafting fixtures, so this test fails if the
+	// renderer ever drifts from the on-disk paths the uninstaller expects.
+	if _, err := engram.InjectWithOptions(homeDir, adapter, engram.InjectOptions{}); err != nil {
+		t.Fatalf("engram.InjectWithOptions(codex) error = %v", err)
+	}
+
+	instructionsPath := filepath.Join(homeDir, ".codex", "engram-instructions.md")
+	compactPath := filepath.Join(homeDir, ".codex", "engram-compact-prompt.md")
+	for _, path := range []string{instructionsPath, compactPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected engram injection to create %q: %v", path, err)
+		}
+	}
+
+	svc.SetEngramUninstallScope(model.EngramUninstallScopeGlobal)
+
+	ops, targets, err := svc.componentOperations(adapter, model.ComponentEngram)
+	if err != nil {
+		t.Fatalf("componentOperations() error = %v", err)
+	}
+
+	for _, want := range []string{instructionsPath, compactPath} {
+		if !slices.Contains(targets, want) {
+			t.Fatalf("componentOperations() targets missing %q; got: %v", want, targets)
+		}
+	}
+
+	for _, op := range ops {
+		if _, _, err := op.apply(op.path); err != nil {
+			t.Fatalf("op.apply(%q) error = %v", op.path, err)
+		}
+	}
+
+	for _, path := range []string{instructionsPath, compactPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected %q to be removed by uninstall, err = %v", path, err)
+		}
+	}
+
+	// No orphaned directory left behind either.
+	if entries, err := os.ReadDir(filepath.Join(homeDir, ".codex")); err == nil {
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "engram-") {
+				t.Fatalf("orphaned engram asset left behind after uninstall: %s", entry.Name())
+			}
+		}
 	}
 }
 

@@ -124,8 +124,11 @@ func normalizedWords(s string) string {
 // at test time rather than at runtime.
 func TestAllEmbeddedAssetsAreReadable(t *testing.T) {
 	expectedFiles := []string{
+		// Canonical Engram protocol asset (full/slim/passive-capture/compact
+		// marker sections — see design.md Decision 3).
+		"engram/protocol.md",
+
 		// Claude agent files
-		"claude/engram-protocol.md",
 		"claude/output-style-neutral.md",
 		"claude/persona-gentleman.md",
 		"claude/sdd-orchestrator.md",
@@ -456,10 +459,15 @@ func TestClaudeEmbeddedAssetLayout(t *testing.T) {
 		seen[entry.Name()] = true
 	}
 
-	for _, name := range []string{"agents", "commands", "engram-protocol.md", "persona-gentleman.md", "sdd-orchestrator.md"} {
+	for _, name := range []string{"agents", "commands", "persona-gentleman.md", "sdd-orchestrator.md"} {
 		if !seen[name] {
 			t.Fatalf("claude embedded assets missing %q", name)
 		}
+	}
+	// engram-protocol.md moved to the canonical engram/protocol.md asset
+	// (design.md Decision 3) — it MUST NOT ship a stale duplicate under claude/.
+	if seen["engram-protocol.md"] {
+		t.Fatal("claude embedded assets must not ship a stale engram-protocol.md — content now lives in engram/protocol.md")
 	}
 
 	commandEntries, err := FS.ReadDir("claude/commands")
@@ -476,6 +484,24 @@ func TestClaudeEmbeddedAssetLayout(t *testing.T) {
 	}
 	if len(agentEntries) != 17 {
 		t.Fatalf("claude agents count = %d, want 17", len(agentEntries))
+	}
+}
+
+// TestEngramEmbeddedAssetLayout verifies the canonical protocol asset
+// directory introduced by the consolidation (design.md Decision 3).
+func TestEngramEmbeddedAssetLayout(t *testing.T) {
+	entries, err := FS.ReadDir("engram")
+	if err != nil {
+		t.Fatalf("ReadDir(engram) error = %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		seen[entry.Name()] = true
+	}
+
+	if !seen["protocol.md"] {
+		t.Fatal("engram embedded assets missing \"protocol.md\"")
 	}
 }
 
@@ -861,12 +887,13 @@ func TestGentlemanLanguageInstructionsDoNotBiasEnglishSessions(t *testing.T) {
 		})
 	}
 
-	// engram-protocol assets must not ship Spanish trigger examples that bias
-	// English sessions into Spanish replies (same mechanism as #341 / #350).
-	// Covers all agent families that ship a dedicated engram instruction asset.
+	// The canonical engram protocol asset must not ship Spanish trigger
+	// examples that bias English sessions into Spanish replies (same
+	// mechanism as #341 / #350). Since design.md Decision 3 consolidated the
+	// former claude/engram-protocol.md and codex/engram-instructions.md into
+	// one canonical source, a single check now covers both surfaces.
 	for _, path := range []string{
-		"claude/engram-protocol.md",
-		"codex/engram-instructions.md",
+		"engram/protocol.md",
 	} {
 		t.Run(path, func(t *testing.T) {
 			content := MustRead(path)
@@ -885,8 +912,7 @@ func TestGentlemanLanguageInstructionsDoNotBiasEnglishSessions(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		"claude/engram-protocol.md",
-		"codex/engram-instructions.md",
+		"engram/protocol.md",
 		"skills/_shared/engram-convention.md",
 	} {
 		t.Run(path+"/lifecycle", func(t *testing.T) {

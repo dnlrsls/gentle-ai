@@ -11,7 +11,6 @@ import (
 
 	"github.com/gentleman-programming/gentle-ai/internal/agents"
 	"github.com/gentleman-programming/gentle-ai/internal/agents/codex"
-	"github.com/gentleman-programming/gentle-ai/internal/assets"
 	"github.com/gentleman-programming/gentle-ai/internal/components/filemerge"
 	"github.com/gentleman-programming/gentle-ai/internal/model"
 )
@@ -184,6 +183,15 @@ type InjectOptions struct {
 	// the per-carril reasoning_effort written to SDD profile files.
 	// nil/empty = use canonical defaults.
 	CodexModelAssignments map[string]model.CodexEffort
+
+	// Version carries the raw installed engram binary version string (e.g.
+	// "engram 1.18.0"), as returned by VerifyVersion(). It feeds the
+	// Decision 1 version-gate: the Claude Code CLAUDE.md section only
+	// renders slim when Version parses to >= v1.4.0. Empty, unknown, or
+	// unparseable values fall back to the full section (safe default). A
+	// raw string (rather than a bool) is required to support the inclusive
+	// at-floor v1.4.0 boundary comparison.
+	Version string
 }
 
 func Inject(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
@@ -471,7 +479,7 @@ func injectWithOptions(configHomeDir, promptDir string, adapter agents.Adapter, 
 		switch adapter.SystemPromptStrategy() {
 		case model.StrategyMarkdownSections:
 			promptPath := adapter.SystemPromptFile(promptDir)
-			protocolContent := assets.MustRead("claude/engram-protocol.md")
+			protocolContent := protocolFor(adapter.Agent(), opts)
 
 			existing, err := readFileOrEmpty(promptPath)
 			if err != nil {
@@ -498,7 +506,7 @@ func injectWithOptions(configHomeDir, promptDir string, adapter agents.Adapter, 
 			// Write the Engram protocol as a standalone Jinja include module.
 			// The static KIMI.md template references it via {% include "engram-protocol.md" %}.
 			configDir := adapter.GlobalConfigDir(promptDir)
-			protocolContent := assets.MustRead("claude/engram-protocol.md")
+			protocolContent := protocolFor(adapter.Agent(), opts)
 			modulePath := filepath.Join(configDir, "engram-protocol.md")
 			mdWrite, err := filemerge.WriteFileAtomic(modulePath, []byte(protocolContent), 0o644)
 			if err != nil {
@@ -509,7 +517,7 @@ func injectWithOptions(configHomeDir, promptDir string, adapter agents.Adapter, 
 
 		default:
 			promptPath := adapter.SystemPromptFile(promptDir)
-			protocolContent := assets.MustRead("claude/engram-protocol.md")
+			protocolContent := protocolFor(adapter.Agent(), opts)
 
 			existing, err := readFileOrEmpty(promptPath)
 			if err != nil {
@@ -578,14 +586,14 @@ func writeCodexInstructionFiles(homeDir string) (instructionsPath, compactPath s
 	instructionsPath = filepath.Join(codexDir, "engram-instructions.md")
 	compactPath = filepath.Join(codexDir, "engram-compact-prompt.md")
 
-	instrContent := assets.MustRead("codex/engram-instructions.md")
+	instrContent := codexInstructions()
 	instrWrite, err := filemerge.WriteFileAtomic(instructionsPath, []byte(instrContent), 0o644)
 	if err != nil {
 		return "", "", fmt.Errorf("write codex engram-instructions.md: %w", err)
 	}
 	_ = instrWrite
 
-	compactContent := assets.MustRead("codex/engram-compact-prompt.md")
+	compactContent := codexCompact()
 	compactWrite, err := filemerge.WriteFileAtomic(compactPath, []byte(compactContent), 0o644)
 	if err != nil {
 		return "", "", fmt.Errorf("write codex engram-compact-prompt.md: %w", err)

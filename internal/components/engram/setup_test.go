@@ -1,7 +1,11 @@
 package engram
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gentleman-programming/gentle-ai/internal/model"
 )
@@ -88,5 +92,75 @@ func TestShouldAttemptSetup(t *testing.T) {
 	}
 	if ShouldAttemptSetup(SetupModeSupported, model.AgentCursor) {
 		t.Fatal("ShouldAttemptSetup(supported, cursor) = true, want false")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ProbeProtocolFlag (task 1.4) — canned-output tests faking the
+// runProtocolProbeCommand seam, same pattern as VerifyVersion's execCommand
+// fakes: no real process is spawned, so the four scenarios are deterministic
+// and portable across environments.
+// ---------------------------------------------------------------------------
+
+func withFakeProtocolProbe(t *testing.T, fake func(ctx context.Context) ([]byte, error)) {
+	t.Helper()
+	orig := runProtocolProbeCommand
+	runProtocolProbeCommand = fake
+	t.Cleanup(func() { runProtocolProbeCommand = orig })
+}
+
+func TestProbeProtocolFlagDetectsSupportedBinary(t *testing.T) {
+	withFakeProtocolProbe(t, func(context.Context) ([]byte, error) {
+		return []byte("Usage: engram setup <slug> [--protocol=slim|full]\n"), nil
+	})
+
+	stdout, err := ProbeProtocolFlag(context.Background())
+	if err != nil {
+		t.Fatalf("ProbeProtocolFlag() error = %v, want nil", err)
+	}
+	if !strings.Contains(stdout, "--protocol") {
+		t.Fatalf("ProbeProtocolFlag() stdout = %q, want it to contain --protocol", stdout)
+	}
+}
+
+func TestProbeProtocolFlagDegradesWhenFlagAbsent(t *testing.T) {
+	withFakeProtocolProbe(t, func(context.Context) ([]byte, error) {
+		return []byte("Usage: engram setup <slug>\n\nInteractive agent menu:\n  1) claude-code\n  2) codex\n"), nil
+	})
+
+	stdout, err := ProbeProtocolFlag(context.Background())
+	if err != nil {
+		t.Fatalf("ProbeProtocolFlag() error = %v, want nil", err)
+	}
+	if strings.Contains(stdout, "--protocol") {
+		t.Fatalf("ProbeProtocolFlag() stdout = %q, want it to NOT contain --protocol (old binary)", stdout)
+	}
+}
+
+func TestProbeProtocolFlagDegradesOnContextDeadlineTimeout(t *testing.T) {
+	withFakeProtocolProbe(t, func(ctx context.Context) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+
+	// A short deadline lets the test complete quickly instead of waiting out
+	// the real 5-second production timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := ProbeProtocolFlag(ctx)
+	if err == nil {
+		t.Fatal("ProbeProtocolFlag() error = nil, want a timeout error so the caller degrades to flag-unsupported")
+	}
+}
+
+func TestProbeProtocolFlagDegradesOnNonZeroExit(t *testing.T) {
+	withFakeProtocolProbe(t, func(context.Context) ([]byte, error) {
+		return nil, errors.New("exit status 2")
+	})
+
+	_, err := ProbeProtocolFlag(context.Background())
+	if err == nil {
+		t.Fatal("ProbeProtocolFlag() error = nil, want a non-nil error so the caller degrades to flag-unsupported")
 	}
 }

@@ -1,10 +1,70 @@
 package engram
 
 import (
+	"context"
+	"fmt"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/gentleman-programming/gentle-ai/internal/model"
 )
+
+// execCommandContext is a package-level seam over exec.CommandContext,
+// mirroring the execCommand (verify.go) convention. It exists so tests can
+// override the spawned process (e.g. substitute a short-lived real process
+// for "engram setup --help") while exercising the real, unfaked
+// runProtocolProbeCommand body under `go test -race` (JD-012).
+var execCommandContext = exec.CommandContext
+
+// protocolProbeTimeout is the hard deadline for ProbeProtocolFlag. It exists
+// so a menu-printing old engram binary (see design.md Decision 4 Open
+// Questions) can never hang the setup loop.
+const protocolProbeTimeout = 5 * time.Second
+
+// runProtocolProbeCommand executes `engram setup --help` with stdin detached
+// (no TTY attached, so a menu-printing binary reading from stdin gets
+// immediate EOF instead of blocking) and returns captured stdout. It is a
+// package-level seam (built on the execCommandContext precedent from
+// verify.go's execCommand) so tests can pin all four ProbeProtocolFlag
+// outcomes — supported, unsupported, timeout, non-zero exit — without
+// spawning a real process.
+//
+// Cancellation is delegated entirely to exec.CommandContext (design.md
+// Decision 4): the stdlib starts and synchronizes the kill-on-cancel
+// watcher internally, so there is no hand-rolled goroutine/select racing an
+// unsynchronized read of cmd.Process against cmd.Start() (JD-012 — the
+// prior hand-rolled version was reproducibly racy under `go test -race` and
+// could leak the child process if ctx fired before Process was set).
+//
+// Invariant: this assumes the process PATH already points at the intended
+// engram binary (see the install-branch PATH management in
+// componentApplyStep.Run, internal/cli/run.go) — same invariant as
+// runVersionCommand below (JD-019).
+var runProtocolProbeCommand = func(ctx context.Context) ([]byte, error) {
+	cmd := execCommandContext(ctx, "engram", "setup", "--help")
+	cmd.Stdin = nil // explicit: never attach a TTY, avoids blocking on interactive input
+	return cmd.Output()
+}
+
+// ProbeProtocolFlag detects whether the installed engram binary supports the
+// --protocol verbosity flag by running a side-effect-free `engram setup
+// --help` probe with a hard 5-second deadline. It returns the captured
+// stdout on success. Any error (timeout, non-zero exit, binary not found)
+// MUST be treated by the caller as "flag unsupported" — omit the flag and
+// fall back to today's behavior (design.md Decision 4). Setup invocation
+// itself MUST NOT fail as a result of this detection.
+func ProbeProtocolFlag(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, protocolProbeTimeout)
+	defer cancel()
+
+	out, err := runProtocolProbeCommand(ctx)
+	if err != nil {
+		return "", fmt.Errorf("probe engram setup --help: %w", err)
+	}
+
+	return string(out), nil
+}
 
 const (
 	SetupModeEnvVar   = "GENTLE_AI_ENGRAM_SETUP_MODE"

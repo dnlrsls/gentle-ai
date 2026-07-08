@@ -2016,3 +2016,220 @@ func TestEngramYAMLCommandRecoveryListShape(t *testing.T) {
 		t.Fatalf("list-shaped command first element not recovered; got:\n%s", text)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Decision 1 per-adapter slim/full selection matrix (16 adapters).
+// ---------------------------------------------------------------------------
+
+// aboveFloorVersion is a version comfortably above the v1.4.0 gate (matches
+// the live evidence cited in design.md Decision 1: engram 1.18.0).
+const aboveFloorVersion = "1.18.0"
+
+// TestProtocolForSelectsSlimOrFullPerDecision1Matrix is the 16-row table test
+// required by task 1.2: Claude Code -> slim (gated on engram >= v1.4.0), all
+// other adapters with a setup slug or system-prompt surface -> full. Pi is
+// covered separately below since it never renders protocol text at all
+// (existing MCP-only precedent, unchanged by this change).
+func TestProtocolForSelectsSlimOrFullPerDecision1Matrix(t *testing.T) {
+	tests := []struct {
+		agent    model.AgentID
+		wantSlim bool
+	}{
+		{model.AgentClaudeCode, true},
+		{model.AgentCodex, false},
+		{model.AgentOpenCode, false},
+		{model.AgentKilocode, false},
+		{model.AgentGeminiCLI, false},
+		{model.AgentAntigravity, false},
+		{model.AgentWindsurf, false},
+		{model.AgentQwenCode, false},
+		{model.AgentCursor, false},
+		{model.AgentVSCodeCopilot, false},
+		{model.AgentKiroIDE, false},
+		{model.AgentKimi, false},
+		{model.AgentTrae, false},
+		{model.AgentHermes, false},
+		{model.AgentOpenClaw, false},
+	}
+
+	if len(tests) != 15 {
+		t.Fatalf("expected 15 non-Pi adapters in the Decision 1 matrix, got %d", len(tests))
+	}
+
+	slim := protocolSlim()
+	full := protocolFull()
+
+	for _, tt := range tests {
+		t.Run(string(tt.agent), func(t *testing.T) {
+			got := protocolFor(tt.agent, InjectOptions{Version: aboveFloorVersion})
+			want := full
+			if tt.wantSlim {
+				want = slim
+			}
+			if got != want {
+				gotKind, wantKind := "full", "full"
+				if got == slim {
+					gotKind = "slim"
+				}
+				if tt.wantSlim {
+					wantKind = "slim"
+				}
+				t.Fatalf("protocolFor(%s, above-floor version) = %s section, want %s section", tt.agent, gotKind, wantKind)
+			}
+		})
+	}
+}
+
+// TestProtocolForPiRendersNoProtocolText asserts the existing MCP-only
+// precedent: Pi never writes protocol text via Inject(), regardless of
+// version, because piEngramProvisioner short-circuits before protocolFor is
+// ever consulted.
+func TestProtocolForPiRendersNoProtocolText(t *testing.T) {
+	home := t.TempDir()
+
+	result, err := InjectWithOptions(home, piAdapter(), InjectOptions{Version: aboveFloorVersion})
+	if err != nil {
+		t.Fatalf("InjectWithOptions(pi) error = %v", err)
+	}
+
+	for _, path := range result.Files {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q) error = %v", path, err)
+		}
+		if strings.Contains(string(content), "mem_save") || strings.Contains(string(content), "Engram Persistent Memory") {
+			t.Fatalf("Pi file %q unexpectedly contains protocol text; got:\n%s", path, content)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Decision 1 version-gate boundary (task 1.3).
+// ---------------------------------------------------------------------------
+
+func TestProtocolForVersionGateBoundary(t *testing.T) {
+	tests := []struct {
+		name     string
+		version  string
+		wantSlim bool
+	}{
+		{"below floor", "1.3.9", false},
+		{"unknown/unparseable version", "not-a-version", false},
+		{"empty version (VerifyVersion failed)", "", false},
+		{"exact floor v1.4.0 (inclusive boundary)", "1.4.0", true},
+		{"above floor", aboveFloorVersion, true},
+	}
+
+	slim := protocolSlim()
+	full := protocolFull()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := protocolFor(model.AgentClaudeCode, InjectOptions{Version: tt.version})
+			want := full
+			if tt.wantSlim {
+				want = slim
+			}
+			if got != want {
+				t.Fatalf("protocolFor(claude-code, version=%q) did not match expected section (wantSlim=%v)", tt.version, tt.wantSlim)
+			}
+		})
+	}
+}
+
+// TestInjectWithOptionsThreadsVersionIntoClaudeSlimSelection is the
+// integration-level counterpart of the boundary test above: it exercises the
+// full InjectWithOptions -> CLAUDE.md write path and asserts the rendered
+// section flips from full to slim once InjectOptions.Version crosses the
+// v1.4.0 floor.
+func TestInjectWithOptionsThreadsVersionIntoClaudeSlimSelection(t *testing.T) {
+	belowFloorHome := t.TempDir()
+	if _, err := InjectWithOptions(belowFloorHome, claudeAdapter(), InjectOptions{Version: "1.3.9"}); err != nil {
+		t.Fatalf("InjectWithOptions(claude, below floor) error = %v", err)
+	}
+	belowContent, err := os.ReadFile(filepath.Join(belowFloorHome, ".claude", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(CLAUDE.md) error = %v", err)
+	}
+	if !strings.Contains(string(belowContent), "needs_review") {
+		t.Fatal("below-floor version must render the FULL section (expected 'needs_review' from full text)")
+	}
+
+	aboveFloorHome := t.TempDir()
+	if _, err := InjectWithOptions(aboveFloorHome, claudeAdapter(), InjectOptions{Version: aboveFloorVersion}); err != nil {
+		t.Fatalf("InjectWithOptions(claude, above floor) error = %v", err)
+	}
+	aboveContent, err := os.ReadFile(filepath.Join(aboveFloorHome, ".claude", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(CLAUDE.md) error = %v", err)
+	}
+	if strings.Contains(string(aboveContent), "needs_review") {
+		t.Fatal("above-floor version must render the SLIM section (must not contain full-only 'needs_review' text)")
+	}
+	if !strings.Contains(string(aboveContent), "SessionStart hook") {
+		t.Fatal("above-floor version must render the SLIM section with its pointer to the full protocol location")
+	}
+}
+
+// TestInjectWithOptionsReInjectConvergesFullToSlimAndBack is the spec
+// scenario "Re-inject converges to target state" (Idempotent injection and
+// clean uninstall across upgrades): a previously-injected full section MUST
+// converge to slim (and vice versa) via the existing marker-based mechanism
+// when the target verdict changes across two Inject calls, without
+// duplicating or corrupting markers.
+func TestInjectWithOptionsReInjectConvergesFullToSlimAndBack(t *testing.T) {
+	home := t.TempDir()
+	claudeMDPath := filepath.Join(home, ".claude", "CLAUDE.md")
+
+	// 1. Full (below-floor / unknown version — safe default).
+	if _, err := InjectWithOptions(home, claudeAdapter(), InjectOptions{}); err != nil {
+		t.Fatalf("InjectWithOptions(full) error = %v", err)
+	}
+	afterFull, err := os.ReadFile(claudeMDPath)
+	if err != nil {
+		t.Fatalf("ReadFile(CLAUDE.md) error = %v", err)
+	}
+	if !strings.Contains(string(afterFull), "needs_review") {
+		t.Fatalf("expected FULL section after first inject; got:\n%s", afterFull)
+	}
+	if n := strings.Count(string(afterFull), "<!-- gentle-ai:engram-protocol -->"); n != 1 {
+		t.Fatalf("expected exactly 1 open marker after first inject, got %d", n)
+	}
+
+	// 2. Re-inject with an above-floor version — MUST converge to slim, in
+	// place, no duplicate markers.
+	if _, err := InjectWithOptions(home, claudeAdapter(), InjectOptions{Version: aboveFloorVersion}); err != nil {
+		t.Fatalf("InjectWithOptions(slim) error = %v", err)
+	}
+	afterSlim, err := os.ReadFile(claudeMDPath)
+	if err != nil {
+		t.Fatalf("ReadFile(CLAUDE.md) error = %v", err)
+	}
+	if strings.Contains(string(afterSlim), "needs_review") {
+		t.Fatalf("expected SLIM section after re-inject with above-floor version; got:\n%s", afterSlim)
+	}
+	if !strings.Contains(string(afterSlim), "SessionStart hook") {
+		t.Fatalf("expected SLIM pointer content after re-inject; got:\n%s", afterSlim)
+	}
+	if n := strings.Count(string(afterSlim), "<!-- gentle-ai:engram-protocol -->"); n != 1 {
+		t.Fatalf("expected exactly 1 open marker after re-inject to slim (no duplication), got %d", n)
+	}
+	if n := strings.Count(string(afterSlim), "<!-- /gentle-ai:engram-protocol -->"); n != 1 {
+		t.Fatalf("expected exactly 1 close marker after re-inject to slim (no duplication), got %d", n)
+	}
+
+	// 3. Re-inject back to full — MUST converge back, still no duplication.
+	if _, err := InjectWithOptions(home, claudeAdapter(), InjectOptions{}); err != nil {
+		t.Fatalf("InjectWithOptions(back to full) error = %v", err)
+	}
+	afterBackToFull, err := os.ReadFile(claudeMDPath)
+	if err != nil {
+		t.Fatalf("ReadFile(CLAUDE.md) error = %v", err)
+	}
+	if !strings.Contains(string(afterBackToFull), "needs_review") {
+		t.Fatalf("expected FULL section after re-inject back to full; got:\n%s", afterBackToFull)
+	}
+	if n := strings.Count(string(afterBackToFull), "<!-- gentle-ai:engram-protocol -->"); n != 1 {
+		t.Fatalf("expected exactly 1 open marker after re-inject back to full (no duplication), got %d", n)
+	}
+}

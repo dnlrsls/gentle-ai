@@ -1,4 +1,3 @@
-<!-- gentle-ai:engram-protocol -->
 ## Engram Persistent Memory
 
 Engram persistent memory is ACTIVE. The full protocol (save format, lifecycle,
@@ -10,4 +9,3 @@ MCP server instructions and the SessionStart hook. Always-on rules:
   automated/SDD artifacts.
 - On any reference to past work: `mem_context` → `mem_search` → `mem_get_observation`.
 - Before saying "done", call `mem_session_summary`.
-<!-- /gentle-ai:engram-protocol -->
