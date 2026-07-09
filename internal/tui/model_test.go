@@ -4523,12 +4523,12 @@ func TestComponentsForPreset_PersonaMatrix(t *testing.T) {
 			wantOpenCodeLogo: true,
 		},
 		{
-			name:             "full-gentleman + custom excludes persona and visual polish",
+			name:             "full-gentleman + custom excludes persona but keeps visual polish",
 			preset:           model.PresetFullGentleman,
 			persona:          model.PersonaCustom,
 			wantPersona:      false,
-			wantClaudeTheme:  false,
-			wantOpenCodeLogo: false,
+			wantClaudeTheme:  true,
+			wantOpenCodeLogo: true,
 		},
 		{
 			name:        "minimal + gentleman includes persona",
@@ -4649,14 +4649,22 @@ func TestPersonaScreenRecomputesComponentsWhenPresetAlreadySet(t *testing.T) {
 		t.Fatalf("Persona = %v, want %v", state.Selection.Persona, model.PersonaCustom)
 	}
 
-	// ComponentPersona and managed visual polish must be removed after recompute.
+	// ComponentPersona must be removed after recompute, but preset-owned visual polish remains.
+	hasClaudeThemeAfter := false
+	hasOpenCodeLogoAfter := false
 	for _, c := range state.Selection.Components {
 		if c == model.ComponentPersona {
 			t.Fatalf("ComponentPersona must not be in components after switching to PersonaCustom; got: %v", state.Selection.Components)
 		}
-		if c == model.ComponentClaudeTheme || c == model.ComponentOpenCodeGentleLogo {
-			t.Fatalf("managed visual polish must not be in components after switching to PersonaCustom; got: %v", state.Selection.Components)
+		if c == model.ComponentClaudeTheme {
+			hasClaudeThemeAfter = true
 		}
+		if c == model.ComponentOpenCodeGentleLogo {
+			hasOpenCodeLogoAfter = true
+		}
+	}
+	if !hasClaudeThemeAfter || !hasOpenCodeLogoAfter {
+		t.Fatalf("visual polish should remain preset-owned after switching to PersonaCustom; got: %v", state.Selection.Components)
 	}
 }
 

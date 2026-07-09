@@ -1,8 +1,8 @@
 package model
 
 // ComponentsForPreset returns the managed components implied by a preset/persona
-// pair. PersonaCustom is a full opt-out from managed persona and managed visual
-// polish, even when the user selects the full Gentleman preset.
+// pair. PersonaCustom opts out of managed persona only; preset choice still
+// controls visual polish.
 func ComponentsForPreset(preset PresetID, persona PersonaID) []ComponentID {
 	var components []ComponentID
 	switch preset {
@@ -20,9 +20,8 @@ func ComponentsForPreset(preset PresetID, persona PersonaID) []ComponentID {
 			ComponentContext7,
 			ComponentPermission,
 			ComponentGGA,
-		}
-		if persona != PersonaCustom {
-			components = append(components, ComponentClaudeTheme, ComponentOpenCodeGentleLogo)
+			ComponentClaudeTheme,
+			ComponentOpenCodeGentleLogo,
 		}
 	}
 	if persona != PersonaCustom {
