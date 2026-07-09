@@ -4506,23 +4506,29 @@ func TestPinErrClearedOnScreenReentry(t *testing.T) {
 // ComponentPersona when persona != PersonaCustom and excludes it for PersonaCustom.
 func TestComponentsForPreset_PersonaMatrix(t *testing.T) {
 	tests := []struct {
-		name        string
-		preset      model.PresetID
-		persona     model.PersonaID
-		wantPersona bool
-		wantNil     bool
+		name             string
+		preset           model.PresetID
+		persona          model.PersonaID
+		wantPersona      bool
+		wantClaudeTheme  bool
+		wantOpenCodeLogo bool
+		wantNil          bool
 	}{
 		{
-			name:        "full-gentleman + gentleman includes persona",
-			preset:      model.PresetFullGentleman,
-			persona:     model.PersonaGentleman,
-			wantPersona: true,
+			name:             "full-gentleman + gentleman includes persona and visual polish",
+			preset:           model.PresetFullGentleman,
+			persona:          model.PersonaGentleman,
+			wantPersona:      true,
+			wantClaudeTheme:  true,
+			wantOpenCodeLogo: true,
 		},
 		{
-			name:        "full-gentleman + custom does not include persona",
-			preset:      model.PresetFullGentleman,
-			persona:     model.PersonaCustom,
-			wantPersona: false,
+			name:             "full-gentleman + custom excludes persona and visual polish",
+			preset:           model.PresetFullGentleman,
+			persona:          model.PersonaCustom,
+			wantPersona:      false,
+			wantClaudeTheme:  false,
+			wantOpenCodeLogo: false,
 		},
 		{
 			name:        "minimal + gentleman includes persona",
@@ -4574,10 +4580,17 @@ func TestComponentsForPreset_PersonaMatrix(t *testing.T) {
 			}
 
 			hasPersona := false
+			hasClaudeTheme := false
+			hasOpenCodeLogo := false
 			for _, c := range got {
 				if c == model.ComponentPersona {
 					hasPersona = true
-					break
+				}
+				if c == model.ComponentClaudeTheme {
+					hasClaudeTheme = true
+				}
+				if c == model.ComponentOpenCodeGentleLogo {
+					hasOpenCodeLogo = true
 				}
 			}
 
@@ -4586,6 +4599,12 @@ func TestComponentsForPreset_PersonaMatrix(t *testing.T) {
 			}
 			if !tt.wantPersona && hasPersona {
 				t.Fatalf("componentsForPreset(%v, %v) should not include ComponentPersona; got: %v", tt.preset, tt.persona, got)
+			}
+			if tt.wantClaudeTheme != hasClaudeTheme {
+				t.Fatalf("componentsForPreset(%v, %v) ComponentClaudeTheme present = %v, want %v; got: %v", tt.preset, tt.persona, hasClaudeTheme, tt.wantClaudeTheme, got)
+			}
+			if tt.wantOpenCodeLogo != hasOpenCodeLogo {
+				t.Fatalf("componentsForPreset(%v, %v) ComponentOpenCodeGentleLogo present = %v, want %v; got: %v", tt.preset, tt.persona, hasOpenCodeLogo, tt.wantOpenCodeLogo, got)
 			}
 		})
 	}
@@ -4603,16 +4622,22 @@ func TestPersonaScreenRecomputesComponentsWhenPresetAlreadySet(t *testing.T) {
 	m.Selection.Persona = model.PersonaGentleman
 	m.Selection.Components = componentsForPreset(model.PresetFullGentleman, model.PersonaGentleman)
 
-	// Confirm that persona currently includes ComponentPersona.
+	// Confirm that managed persona and visual polish are initially included.
 	hasPersonaBefore := false
+	hasPolishBefore := false
 	for _, c := range m.Selection.Components {
 		if c == model.ComponentPersona {
 			hasPersonaBefore = true
-			break
+		}
+		if c == model.ComponentClaudeTheme || c == model.ComponentOpenCodeGentleLogo {
+			hasPolishBefore = true
 		}
 	}
 	if !hasPersonaBefore {
 		t.Fatal("setup: expected ComponentPersona in initial components")
+	}
+	if !hasPolishBefore {
+		t.Fatal("setup: expected managed visual polish in initial components")
 	}
 
 	// Move cursor to PersonaCustom and confirm.
@@ -4624,10 +4649,13 @@ func TestPersonaScreenRecomputesComponentsWhenPresetAlreadySet(t *testing.T) {
 		t.Fatalf("Persona = %v, want %v", state.Selection.Persona, model.PersonaCustom)
 	}
 
-	// ComponentPersona must be removed after recompute.
+	// ComponentPersona and managed visual polish must be removed after recompute.
 	for _, c := range state.Selection.Components {
 		if c == model.ComponentPersona {
 			t.Fatalf("ComponentPersona must not be in components after switching to PersonaCustom; got: %v", state.Selection.Components)
+		}
+		if c == model.ComponentClaudeTheme || c == model.ComponentOpenCodeGentleLogo {
+			t.Fatalf("managed visual polish must not be in components after switching to PersonaCustom; got: %v", state.Selection.Components)
 		}
 	}
 }
