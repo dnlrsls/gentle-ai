@@ -17,6 +17,20 @@ import (
 
 type stubSnapshotter struct{}
 
+func TestExpandVisualPolishUninstallComponents(t *testing.T) {
+	got := expandVisualPolishUninstallComponents([]model.ComponentID{model.ComponentTheme})
+	for _, want := range []model.ComponentID{model.ComponentTheme, model.ComponentClaudeTheme, model.ComponentOpenCodeGentleLogo} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("expanded visual polish components missing %q: %v", want, got)
+		}
+	}
+
+	unchanged := expandVisualPolishUninstallComponents([]model.ComponentID{model.ComponentPersona})
+	if !slices.Equal(unchanged, []model.ComponentID{model.ComponentPersona}) {
+		t.Fatalf("non-polish components should not expand: %v", unchanged)
+	}
+}
+
 func readJSONFileForTest(t *testing.T, path string) map[string]any {
 	t.Helper()
 	data, err := os.ReadFile(path)
