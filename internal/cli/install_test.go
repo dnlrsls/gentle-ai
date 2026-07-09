@@ -79,7 +79,6 @@ func TestNormalizeInstallFlagsDefaults(t *testing.T) {
 			model.ComponentContext7,
 			model.ComponentPermission,
 			model.ComponentGGA,
-			model.ComponentTheme,
 			model.ComponentClaudeTheme,
 			model.ComponentOpenCodeGentleLogo,
 			model.ComponentPersona,
@@ -117,9 +116,12 @@ func TestNormalizeInstallFlagsFullPresetCustomPersonaKeepsPresetPolish(t *testin
 		if got == model.ComponentPersona {
 			t.Fatalf("components should not include persona for custom persona; got %#v", input.Selection.Components)
 		}
+		if got == model.ComponentTheme {
+			t.Fatalf("components should not include generic theme; got %#v", input.Selection.Components)
+		}
 	}
 
-	for _, want := range model.VisualPolishComponents() {
+	for _, want := range []model.ComponentID{model.ComponentClaudeTheme, model.ComponentOpenCodeGentleLogo} {
 		found := false
 		for _, got := range input.Selection.Components {
 			if got == want {

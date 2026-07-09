@@ -4516,20 +4516,20 @@ func TestComponentsForPreset_PersonaMatrix(t *testing.T) {
 		wantNil          bool
 	}{
 		{
-			name:             "full-gentleman + gentleman includes persona and visual polish",
+			name:             "full-gentleman + gentleman includes persona and safe agent visuals",
 			preset:           model.PresetFullGentleman,
 			persona:          model.PersonaGentleman,
 			wantPersona:      true,
-			wantTheme:        true,
+			wantTheme:        false,
 			wantClaudeTheme:  true,
 			wantOpenCodeLogo: true,
 		},
 		{
-			name:             "full-gentleman + custom excludes persona but keeps visual polish",
+			name:             "full-gentleman + custom excludes persona but keeps safe agent visuals",
 			preset:           model.PresetFullGentleman,
 			persona:          model.PersonaCustom,
 			wantPersona:      false,
-			wantTheme:        true,
+			wantTheme:        false,
 			wantClaudeTheme:  true,
 			wantOpenCodeLogo: true,
 		},
@@ -4659,15 +4659,19 @@ func TestPersonaScreenRecomputesComponentsWhenPresetAlreadySet(t *testing.T) {
 		t.Fatalf("Persona = %v, want %v", state.Selection.Persona, model.PersonaCustom)
 	}
 
-	// ComponentPersona must be removed after recompute, but preset-owned visual polish remains.
+	// ComponentPersona and the generic theme must be removed after recompute, while
+	// preset-owned agent-specific visual components remain.
 	for _, c := range state.Selection.Components {
 		if c == model.ComponentPersona {
 			t.Fatalf("ComponentPersona must not be in components after switching to PersonaCustom; got: %v", state.Selection.Components)
 		}
+		if c == model.ComponentTheme {
+			t.Fatalf("ComponentTheme must not be in full preset components; got: %v", state.Selection.Components)
+		}
 	}
-	for _, want := range model.VisualPolishComponents() {
+	for _, want := range []model.ComponentID{model.ComponentClaudeTheme, model.ComponentOpenCodeGentleLogo} {
 		if !slices.Contains(state.Selection.Components, want) {
-			t.Fatalf("visual polish should remain preset-owned after switching to PersonaCustom; missing %v in %v", want, state.Selection.Components)
+			t.Fatalf("agent-specific visual should remain preset-owned after switching to PersonaCustom; missing %v in %v", want, state.Selection.Components)
 		}
 	}
 }
