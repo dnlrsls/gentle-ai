@@ -3177,6 +3177,7 @@ func setupCodexSyncHome(t *testing.T, carrilModels map[string]string, effortAssi
 
 func setupCodexSyncHomeWithPhaseModels(t *testing.T, carrilModels map[string]string, effortAssignments map[string]string, phaseModels map[string]string) string {
 	t.Helper()
+	t.Cleanup(codex.SetRuntimeVersionCommandForTest("codex-cli 0.144.0", nil))
 	home := t.TempDir()
 	s := state.InstallState{
 		InstalledAgents:             []string{"codex"},

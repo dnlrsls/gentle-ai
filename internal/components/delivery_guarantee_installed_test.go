@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	codexagent "github.com/gentleman-programming/gentle-ai/internal/agents/codex"
 	"github.com/gentleman-programming/gentle-ai/internal/components/engram"
 )
 
@@ -125,6 +126,7 @@ func TestDeliveryGuarantee_InstalledOutputs(t *testing.T) {
 	t.Run("codex-instructions", func(t *testing.T) {
 		home := t.TempDir()
 		engram.SetLookPathForTest(t, "/opt/homebrew/bin/engram", "")
+		t.Cleanup(codexagent.SetRuntimeVersionCommandForTest("codex-cli 0.144.0", nil))
 
 		result, err := engram.Inject(home, codexAdapter())
 		if err != nil {
