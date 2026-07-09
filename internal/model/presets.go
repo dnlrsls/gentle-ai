@@ -1,5 +1,11 @@
 package model
 
+// VisualPolishComponents returns the managed theme/logo components that make up
+// the visual polish option across install and uninstall flows.
+func VisualPolishComponents() []ComponentID {
+	return []ComponentID{ComponentTheme, ComponentClaudeTheme, ComponentOpenCodeGentleLogo}
+}
+
 // ComponentsForPreset returns the managed components implied by a preset/persona
 // pair. PersonaCustom opts out of managed persona only; preset choice still
 // controls visual polish.
@@ -20,9 +26,8 @@ func ComponentsForPreset(preset PresetID, persona PersonaID) []ComponentID {
 			ComponentContext7,
 			ComponentPermission,
 			ComponentGGA,
-			ComponentClaudeTheme,
-			ComponentOpenCodeGentleLogo,
 		}
+		components = append(components, VisualPolishComponents()...)
 	}
 	if persona != PersonaCustom {
 		components = append(components, ComponentPersona)

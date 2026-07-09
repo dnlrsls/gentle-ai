@@ -17,11 +17,11 @@ Toggle components with enter or space.
   [ ] gga
     Gentleman Guardian Angel — AI provider switcher
   [ ] theme
-    Visual polish: Gentleman Kanagawa theme overlay
+    Visual polish: OpenCode color theme
   [ ] claude-theme
-    Visual polish: Claude Code Gentleman custom theme
+    Visual polish: Claude Code color theme
   [ ] opencode-gentle-logo
-    Visual polish: OpenCode home logo TUI plugin with Braille rose
+    Visual polish: OpenCode home logo plugin
 
   Continue
   Back

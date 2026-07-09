@@ -79,6 +79,7 @@ func TestNormalizeInstallFlagsDefaults(t *testing.T) {
 			model.ComponentContext7,
 			model.ComponentPermission,
 			model.ComponentGGA,
+			model.ComponentTheme,
 			model.ComponentClaudeTheme,
 			model.ComponentOpenCodeGentleLogo,
 			model.ComponentPersona,
@@ -118,7 +119,7 @@ func TestNormalizeInstallFlagsFullPresetCustomPersonaKeepsPresetPolish(t *testin
 		}
 	}
 
-	for _, want := range []model.ComponentID{model.ComponentClaudeTheme, model.ComponentOpenCodeGentleLogo} {
+	for _, want := range model.VisualPolishComponents() {
 		found := false
 		for _, got := range input.Selection.Components {
 			if got == want {

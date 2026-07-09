@@ -259,9 +259,9 @@ func (s *Service) PartialUninstallWithProfiles(agentIDs []model.AgentID, compone
 
 func expandVisualPolishUninstallComponents(components []model.ComponentID) []model.ComponentID {
 	shouldExpand := false
+	visualPolish := model.VisualPolishComponents()
 	for _, component := range components {
-		switch component {
-		case model.ComponentTheme, model.ComponentClaudeTheme, model.ComponentOpenCodeGentleLogo:
+		if slices.Contains(visualPolish, component) {
 			shouldExpand = true
 		}
 	}
@@ -270,7 +270,7 @@ func expandVisualPolishUninstallComponents(components []model.ComponentID) []mod
 	}
 
 	expanded := slices.Clone(components)
-	for _, component := range []model.ComponentID{model.ComponentTheme, model.ComponentClaudeTheme, model.ComponentOpenCodeGentleLogo} {
+	for _, component := range model.VisualPolishComponents() {
 		if !slices.Contains(expanded, component) {
 			expanded = append(expanded, component)
 		}
