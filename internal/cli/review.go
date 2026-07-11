@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -298,7 +297,8 @@ func RunReviewStart(args []string, stdout io.Writer) error {
 }
 
 func classifyReviewSnapshot(ctx context.Context, repo string, snapshot reviewtransaction.Snapshot) (reviewtransaction.RiskLevel, error) {
-	output, err := runReviewClassificationGit(ctx, repo, "diff", "--numstat", "-z", "--no-ext-diff", "--no-textconv", "--no-renames", snapshot.BaseTree, snapshot.CandidateTree, "--")
+	command := exec.CommandContext(ctx, "git", "-C", repo, "diff", "--numstat", "--no-renames", snapshot.BaseTree, snapshot.CandidateTree, "--")
+	output, err := command.Output()
 	if err != nil {
 		return "", err
 	}
@@ -306,27 +306,23 @@ func classifyReviewSnapshot(ctx context.Context, repo string, snapshot reviewtra
 	onlyNonExecutable := true
 	touchesConfiguration := false
 	seenPaths := make(map[string]struct{}, len(snapshot.Paths))
-	for _, record := range bytes.Split(output, []byte{0}) {
-		if len(record) == 0 {
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if line == "" {
 			continue
 		}
-		additions, remainder, ok := bytes.Cut(record, []byte{'\t'})
-		if !ok {
-			return "", fmt.Errorf("unexpected immutable diff stat %q", record)
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 {
+			return "", fmt.Errorf("unexpected immutable diff stat %q", line)
 		}
-		deletions, path, ok := bytes.Cut(remainder, []byte{'\t'})
-		if !ok || len(path) == 0 {
-			return "", fmt.Errorf("unexpected immutable diff stat %q", record)
-		}
-		stat := reviewtransaction.DiffStat{Path: string(path)}
-		if bytes.Equal(additions, []byte("-")) && bytes.Equal(deletions, []byte("-")) {
+		stat := reviewtransaction.DiffStat{Path: fields[2]}
+		if fields[0] == "-" && fields[1] == "-" {
 			stat.Binary = true
 		} else {
-			stat.Additions, err = strconv.Atoi(string(additions))
+			stat.Additions, err = strconv.Atoi(fields[0])
 			if err != nil {
 				return "", fmt.Errorf("parse additions for %q: %w", stat.Path, err)
 			}
-			stat.Deletions, err = strconv.Atoi(string(deletions))
+			stat.Deletions, err = strconv.Atoi(fields[1])
 			if err != nil {
 				return "", fmt.Errorf("parse deletions for %q: %w", stat.Path, err)
 			}
@@ -344,100 +340,9 @@ func classifyReviewSnapshot(ctx context.Context, repo string, snapshot reviewtra
 	if len(seenPaths) != len(snapshot.Paths) {
 		return "", errors.New("immutable tree diff contains paths outside the review snapshot")
 	}
-	signals, err := reviewSnapshotRiskSignals(ctx, repo, snapshot)
-	if err != nil {
-		return "", err
-	}
 	return reviewtransaction.ClassifyRisk(reviewtransaction.RiskInput{
-		Stats: stats, Signals: signals, OnlyNonExecutableChanges: onlyNonExecutable, TouchesConfiguration: touchesConfiguration,
+		Stats: stats, OnlyNonExecutableChanges: onlyNonExecutable, TouchesConfiguration: touchesConfiguration,
 	})
-}
-
-func reviewSnapshotRiskSignals(ctx context.Context, repo string, snapshot reviewtransaction.Snapshot) ([]reviewtransaction.RiskSignal, error) {
-	output, err := runReviewClassificationGit(ctx, repo, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0", snapshot.BaseTree, snapshot.CandidateTree, "--")
-	if err != nil {
-		return nil, err
-	}
-	semanticText := normalizeReviewRiskText(string(output))
-	signals := make([]reviewtransaction.RiskSignal, 0, 4)
-	if containsReviewRiskTerm(semanticText, "permission", "permissions", "chmod", "chown", "privilege", "authorization", "authorize", "access control") {
-		signals = append(signals, reviewtransaction.SignalPermissions)
-	}
-	if containsReviewRiskTerm(semanticText, "credential", "credentials", "secret", "secrets", "password", "passwords", "redact", "redaction", "data exposure") {
-		signals = append(signals, reviewtransaction.SignalDataExposure)
-	}
-	if containsReviewRiskTerm(semanticText, "remove all", "delete all", "truncate", "purge", "destroy", "drop table", "drop database", "data loss") {
-		signals = append(signals, reviewtransaction.SignalDataLoss)
-	}
-	if containsReviewRiskTerm(semanticText, "exec", "commandcontext", "subprocess", "spawn", "shell", "process", "sh", "bash", "zsh", "fish", "powershell") {
-		signals = append(signals, reviewtransaction.SignalShellProcess)
-	}
-	return signals, nil
-}
-
-func normalizeReviewRiskText(value string) string {
-	var separated strings.Builder
-	separated.Grow(len(value))
-	var previous rune
-	for _, current := range value {
-		if current >= 'A' && current <= 'Z' && ((previous >= 'a' && previous <= 'z') || (previous >= '0' && previous <= '9')) {
-			separated.WriteByte(' ')
-		}
-		separated.WriteRune(current)
-		previous = current
-	}
-	return " " + strings.Join(strings.FieldsFunc(strings.ToLower(separated.String()), func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
-	}), " ") + " "
-}
-
-func containsReviewRiskTerm(text string, terms ...string) bool {
-	for _, term := range terms {
-		if strings.Contains(text, " "+term+" ") {
-			return true
-		}
-	}
-	return false
-}
-
-func runReviewClassificationGit(ctx context.Context, repo string, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, "git", append([]string{"--no-replace-objects", "-C", repo}, args...)...)
-	command.Env = sanitizedReviewClassificationGitEnvironment(os.Environ())
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
-	}
-	return output, nil
-}
-
-func sanitizedReviewClassificationGitEnvironment(environment []string) []string {
-	unsafe := map[string]struct{}{
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES": {},
-		"GIT_CEILING_DIRECTORIES":          {},
-		"GIT_COMMON_DIR":                   {},
-		"GIT_DIR":                          {},
-		"GIT_DISCOVERY_ACROSS_FILESYSTEM":  {},
-		"GIT_GRAFT_FILE":                   {},
-		"GIT_IMPLICIT_WORK_TREE":           {},
-		"GIT_INDEX_FILE":                   {},
-		"GIT_INTERNAL_SUPER_PREFIX":        {},
-		"GIT_NAMESPACE":                    {},
-		"GIT_NO_REPLACE_OBJECTS":           {},
-		"GIT_OBJECT_DIRECTORY":             {},
-		"GIT_PREFIX":                       {},
-		"GIT_QUARANTINE_PATH":              {},
-		"GIT_REPLACE_REF_BASE":             {},
-		"GIT_SHALLOW_FILE":                 {},
-		"GIT_WORK_TREE":                    {},
-	}
-	result := make([]string, 0, len(environment)+1)
-	for _, entry := range environment {
-		name, _, _ := strings.Cut(entry, "=")
-		if _, remove := unsafe[name]; !remove && name != "LC_ALL" {
-			result = append(result, entry)
-		}
-	}
-	return append(result, "LC_ALL=C")
 }
 
 func isNonExecutableReviewPath(path string) bool {

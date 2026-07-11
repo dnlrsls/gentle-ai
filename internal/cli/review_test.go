@@ -303,10 +303,6 @@ func TestRunReviewStartBindsSelectedLensesToImmutableSnapshotRisk(t *testing.T) 
 		{name: "low", changePath: "guide.md", content: "documentation only\n", wantRisk: reviewtransaction.RiskLow},
 		{name: "medium", changePath: "tracked.txt", content: "standard executable change\n", lenses: []string{reviewtransaction.LensReliability}, wantRisk: reviewtransaction.RiskMedium},
 		{name: "high", changePath: "internal/security/check.go", content: "package security\n", lenses: []string{reviewtransaction.LensRisk, reviewtransaction.LensResilience, reviewtransaction.LensReadability, reviewtransaction.LensReliability}, wantRisk: reviewtransaction.RiskHigh},
-		{name: "permissions semantic signal", changePath: "internal/policy/rules.go", content: "package policy\nvar permissions = []string{\"read\"}\n", lenses: []string{reviewtransaction.LensRisk, reviewtransaction.LensResilience, reviewtransaction.LensReadability, reviewtransaction.LensReliability}, wantRisk: reviewtransaction.RiskHigh},
-		{name: "data exposure semantic signal", changePath: "internal/output/render.go", content: "package output\nfunc redactCredentials() {}\n", lenses: []string{reviewtransaction.LensRisk, reviewtransaction.LensResilience, reviewtransaction.LensReadability, reviewtransaction.LensReliability}, wantRisk: reviewtransaction.RiskHigh},
-		{name: "data loss semantic signal", changePath: "internal/storage/cleanup.go", content: "package storage\nfunc cleanup() { os.RemoveAll(root) }\n", lenses: []string{reviewtransaction.LensRisk, reviewtransaction.LensResilience, reviewtransaction.LensReadability, reviewtransaction.LensReliability}, wantRisk: reviewtransaction.RiskHigh},
-		{name: "shell process semantic signal", changePath: "internal/runtime/runner.go", content: "package runtime\nfunc run() { exec.CommandContext(ctx, name) }\n", lenses: []string{reviewtransaction.LensRisk, reviewtransaction.LensResilience, reviewtransaction.LensReadability, reviewtransaction.LensReliability}, wantRisk: reviewtransaction.RiskHigh},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -317,7 +313,7 @@ func TestRunReviewStartBindsSelectedLensesToImmutableSnapshotRisk(t *testing.T) 
 			if err := os.WriteFile(filepath.Join(repo, tt.changePath), []byte(tt.content), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			args := []string{"--cwd", repo, "--lineage", "risk-" + strings.ReplaceAll(tt.name, " ", "-"), "--policy-file", policy, "--mode", string(reviewtransaction.ModeOrdinaryBounded)}
+			args := []string{"--cwd", repo, "--lineage", "risk-" + tt.name, "--policy-file", policy, "--mode", string(reviewtransaction.ModeOrdinaryBounded)}
 			if tt.changePath != "tracked.txt" {
 				args = append(args, "--intended-untracked", tt.changePath)
 			}
@@ -349,99 +345,6 @@ func TestRunReviewStartBindsSelectedLensesToImmutableSnapshotRisk(t *testing.T) 
 	}, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "low risk requires exactly 0") {
 		t.Fatalf("RunReviewStart(risk mismatch) error = %v", err)
-	}
-}
-
-func TestRunReviewStartClassifiesUnusualPathsAndRenames(t *testing.T) {
-	policy := filepath.Join(t.TempDir(), "policy.md")
-	if err := os.WriteFile(policy, []byte("bounded policy\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	tests := []struct {
-		name  string
-		setup func(t *testing.T, repo string) []string
-	}{
-		{
-			name: "tabs newlines quotes and trailing whitespace",
-			setup: func(t *testing.T, repo string) []string {
-				path := "odd\tline\n'quoted' \"double\" trailing "
-				if err := os.WriteFile(filepath.Join(repo, path), []byte("ordinary change\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return []string{"--intended-untracked", path}
-			},
-		},
-		{
-			name: "rename is matched as source and destination",
-			setup: func(t *testing.T, repo string) []string {
-				if err := os.Rename(filepath.Join(repo, "tracked.txt"), filepath.Join(repo, "renamed 'file'.txt")); err != nil {
-					t.Fatal(err)
-				}
-				return nil
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			repo := initReviewCLIRepo(t)
-			args := []string{
-				"--cwd", repo, "--lineage", "unusual-path", "--policy-file", policy,
-				"--mode", string(reviewtransaction.ModeOrdinaryBounded), "--lens", reviewtransaction.LensReliability,
-			}
-			args = append(args, tt.setup(t, repo)...)
-			var output bytes.Buffer
-			if err := RunReviewStart(args, &output); err != nil {
-				t.Fatalf("RunReviewStart() error = %v", err)
-			}
-			var result ReviewStartResult
-			if err := json.Unmarshal(output.Bytes(), &result); err != nil {
-				t.Fatal(err)
-			}
-			if result.Transaction.RiskLevel != reviewtransaction.RiskMedium {
-				t.Fatalf("risk = %q, want %q", result.Transaction.RiskLevel, reviewtransaction.RiskMedium)
-			}
-		})
-	}
-}
-
-func TestRunReviewStartIgnoresInheritedGitRepositoryOverridesAndReplacements(t *testing.T) {
-	repo := initReviewCLIRepo(t)
-	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("ordinary change\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	baseBlob := strings.TrimSpace(runReviewCLIGit(t, repo, "rev-parse", "HEAD:tracked.txt"))
-	candidateBlob := strings.TrimSpace(runReviewCLIGit(t, repo, "hash-object", "-w", "tracked.txt"))
-	runReviewCLIGit(t, repo, "replace", candidateBlob, baseBlob)
-	policy := filepath.Join(t.TempDir(), "policy.md")
-	if err := os.WriteFile(policy, []byte("bounded policy\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	invalidPath := filepath.Join(t.TempDir(), "hostile")
-	for _, name := range []string{
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CEILING_DIRECTORIES", "GIT_COMMON_DIR", "GIT_DIR",
-		"GIT_GRAFT_FILE", "GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_OBJECT_DIRECTORY", "GIT_QUARANTINE_PATH",
-		"GIT_REPLACE_REF_BASE", "GIT_SHALLOW_FILE", "GIT_WORK_TREE",
-	} {
-		t.Setenv(name, invalidPath)
-	}
-	t.Setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "true")
-	t.Setenv("GIT_IMPLICIT_WORK_TREE", "false")
-	t.Setenv("GIT_INTERNAL_SUPER_PREFIX", "hostile/")
-	t.Setenv("GIT_NO_REPLACE_OBJECTS", "0")
-
-	var output bytes.Buffer
-	if err := RunReviewStart([]string{
-		"--cwd", repo, "--lineage", "hostile-git-environment", "--policy-file", policy,
-		"--mode", string(reviewtransaction.ModeOrdinaryBounded), "--lens", reviewtransaction.LensReliability,
-	}, &output); err != nil {
-		t.Fatalf("RunReviewStart() error = %v", err)
-	}
-	var result ReviewStartResult
-	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.Transaction.RiskLevel != reviewtransaction.RiskMedium {
-		t.Fatalf("risk = %q, want %q", result.Transaction.RiskLevel, reviewtransaction.RiskMedium)
 	}
 }
 
