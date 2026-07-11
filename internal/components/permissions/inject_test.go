@@ -61,6 +61,10 @@ func assertCodexWorkspaceWriteRulesScoped(t *testing.T, text string) {
 	}
 }
 
+func codexWorkspaceRootsSection(text string) string {
+	return tomlSection(text, `[permissions.gentle-dev.workspace_roots]`)
+}
+
 // TestInjectHermesSkipsPermissions verifies that Hermes returns nil (no file written)
 // because Hermes permission format is undocumented — §14 of spec.
 func TestInjectHermesSkipsPermissions(t *testing.T) {
@@ -343,6 +347,9 @@ func TestInjectAntigravitySkipsPermissions(t *testing.T) {
 
 func TestInjectCodexWritesGentleDevPermissionsProfile(t *testing.T) {
 	home := t.TempDir()
+	origGOOS := codexPermissionsGOOS
+	codexPermissionsGOOS = "linux"
+	t.Cleanup(func() { codexPermissionsGOOS = origGOOS })
 
 	result, err := Inject(home, codexAdapter())
 	if err != nil {
@@ -460,6 +467,257 @@ func TestInjectCodexPermissionsSkipsNixStoreOnWindows(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("Windows Codex config missing non-fatal Nix home path %q; got:\n%s", want, text)
 		}
+	}
+}
+
+func TestInjectCodexPermissionsExcludesHomeWorkspaceRootOnWindows(t *testing.T) {
+	home := t.TempDir()
+	origGOOS := codexPermissionsGOOS
+	codexPermissionsGOOS = "windows"
+	t.Cleanup(func() { codexPermissionsGOOS = origGOOS })
+
+	if _, err := Inject(home, codexAdapter()); err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	workspaceRoots := codexWorkspaceRootsSection(string(content))
+	if strings.Contains(workspaceRoots, `"~" = true`) {
+		t.Fatalf("Windows Codex config should not include the home workspace root; got:\n%s", workspaceRoots)
+	}
+}
+
+func TestInjectCodexPermissionsRemovesHomeWorkspaceRootOnWindows(t *testing.T) {
+	origGOOS := codexPermissionsGOOS
+	codexPermissionsGOOS = "windows"
+	t.Cleanup(func() { codexPermissionsGOOS = origGOOS })
+
+	tests := []struct {
+		name         string
+		homeRoot     string
+		prefixedRoot string
+	}{
+		{name: "canonical double-quoted key", homeRoot: `"~" = true`, prefixedRoot: `"~/Documents/project" = true`},
+		{name: "single-quoted key", homeRoot: `'~' = true`, prefixedRoot: `'~/Documents/project' = true`},
+		{name: "tab before equals", homeRoot: "\"~\"\t=\ttrue", prefixedRoot: "\"~/Documents/project\"\t=\ttrue"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			configPath := filepath.Join(home, ".codex", "config.toml")
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+				t.Fatalf("MkdirAll() error = %v", err)
+			}
+			initial := "[permissions.gentle-dev.workspace_roots]\n" + tt.homeRoot + "\n" + tt.prefixedRoot + "\n\n[unrelated]\n'~'\t= true\n"
+			if err := os.WriteFile(configPath, []byte(initial), 0o644); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+
+			if _, err := Inject(home, codexAdapter()); err != nil {
+				t.Fatalf("Inject() error = %v", err)
+			}
+
+			content, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("ReadFile() error = %v", err)
+			}
+			workspaceRoots := codexWorkspaceRootsSection(string(content))
+			if strings.Contains(workspaceRoots, tt.homeRoot) {
+				t.Fatalf("Windows Codex config still contains home workspace root %q; got:\n%s", tt.homeRoot, workspaceRoots)
+			}
+			if !strings.Contains(workspaceRoots, tt.prefixedRoot) {
+				t.Fatalf("Windows Codex config did not preserve prefixed workspace root %q; got:\n%s", tt.prefixedRoot, workspaceRoots)
+			}
+			if !strings.Contains(tomlSection(string(content), "[unrelated]"), "'~'\t= true") {
+				t.Fatalf("Windows Codex migration removed the home key from an unrelated table; got:\n%s", content)
+			}
+		})
+	}
+}
+
+func TestInjectCodexPermissionsRemovesDottedHomeWorkspaceRootOnWindows(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	initial := "permissions.\"gentle-dev\".workspace_roots.\"~\" = true\npermissions.gentle-dev.workspace_roots.\"~/project\" = true\n"
+	if err := os.WriteFile(configPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	origGOOS := codexPermissionsGOOS
+	codexPermissionsGOOS = "windows"
+	t.Cleanup(func() { codexPermissionsGOOS = origGOOS })
+
+	if _, err := Inject(home, codexAdapter()); err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(content), `workspace_roots."~" = true`) {
+		t.Fatalf("Windows Codex config still contains dotted home workspace root; got:\n%s", content)
+	}
+	if !strings.Contains(string(content), `workspace_roots."~/project" = true`) {
+		t.Fatalf("Windows Codex config did not preserve dotted prefixed workspace root; got:\n%s", content)
+	}
+}
+
+func TestInjectCodexPermissionsRecognizesQuotedWorkspaceRootsHeader(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	initial := "[permissions.\"gentle-dev\".workspace_roots]\n\"~\" = true\n\"~/project\" = true\n"
+	if err := os.WriteFile(configPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	origGOOS := codexPermissionsGOOS
+	codexPermissionsGOOS = "windows"
+	t.Cleanup(func() { codexPermissionsGOOS = origGOOS })
+
+	if _, err := Inject(home, codexAdapter()); err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(content), `"~" = true`) {
+		t.Fatalf("Windows Codex config still contains home root under quoted table header; got:\n%s", content)
+	}
+	if !strings.Contains(string(content), `"~/project" = true`) {
+		t.Fatalf("Windows Codex config did not preserve prefixed root under quoted table header; got:\n%s", content)
+	}
+}
+
+func TestInjectCodexPermissionsRecognizesWorkspaceRootsHeaderWithComment(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	initial := "[permissions.gentle-dev.workspace_roots] # managed roots\n'~' = true\n'~/project' = true\n"
+	if err := os.WriteFile(configPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	origGOOS := codexPermissionsGOOS
+	codexPermissionsGOOS = "windows"
+	t.Cleanup(func() { codexPermissionsGOOS = origGOOS })
+
+	if _, err := Inject(home, codexAdapter()); err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if strings.Contains(string(content), `'~' = true`) {
+		t.Fatalf("Windows Codex config still contains home root under commented table header; got:\n%s", content)
+	}
+	if !strings.Contains(string(content), `'~/project' = true`) {
+		t.Fatalf("Windows Codex config did not preserve prefixed root under commented table header; got:\n%s", content)
+	}
+}
+
+func TestInjectCodexPermissionsStopsAtCommentedFollowingHeader(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	initial := "[permissions.gentle-dev.workspace_roots]\n\"~\" = true\n\n[unrelated] # preserve this table\n\"~\" = true\n"
+	if err := os.WriteFile(configPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	origGOOS := codexPermissionsGOOS
+	codexPermissionsGOOS = "windows"
+	t.Cleanup(func() { codexPermissionsGOOS = origGOOS })
+
+	if _, err := Inject(home, codexAdapter()); err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	unrelated := tomlSection(string(content), "[unrelated] # preserve this table")
+	if !strings.Contains(unrelated, `"~" = true`) {
+		t.Fatalf("Windows Codex migration removed home key from following commented table; got:\n%s", content)
+	}
+}
+
+func TestInjectCodexPermissionsRetainsHomeWorkspaceRootOutsideWindows(t *testing.T) {
+	home := t.TempDir()
+	origGOOS := codexPermissionsGOOS
+	codexPermissionsGOOS = "linux"
+	t.Cleanup(func() { codexPermissionsGOOS = origGOOS })
+
+	if _, err := Inject(home, codexAdapter()); err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	workspaceRoots := codexWorkspaceRootsSection(string(content))
+	if !strings.Contains(workspaceRoots, `"~" = true`) {
+		t.Fatalf("non-Windows Codex config missing the home workspace root; got:\n%s", workspaceRoots)
+	}
+}
+
+func TestInjectCodexPermissionsWindowsWorkspaceRootMigrationIsIdempotent(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	initial := "[permissions.gentle-dev.workspace_roots]\n'~'\t=\ttrue\n"
+	if err := os.WriteFile(configPath, []byte(initial), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	origGOOS := codexPermissionsGOOS
+	codexPermissionsGOOS = "windows"
+	t.Cleanup(func() { codexPermissionsGOOS = origGOOS })
+
+	first, err := Inject(home, codexAdapter())
+	if err != nil {
+		t.Fatalf("Inject() first error = %v", err)
+	}
+	if !first.Changed {
+		t.Fatal("Inject() first changed = false")
+	}
+	firstContent, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() first error = %v", err)
+	}
+
+	second, err := Inject(home, codexAdapter())
+	if err != nil {
+		t.Fatalf("Inject() second error = %v", err)
+	}
+	if second.Changed {
+		t.Fatal("Inject() second changed = true")
+	}
+	secondContent, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile() second error = %v", err)
+	}
+	if string(firstContent) != string(secondContent) {
+		t.Fatalf("Windows Codex workspace root migration is not idempotent:\nfirst:\n%s\nsecond:\n%s", firstContent, secondContent)
 	}
 }
 

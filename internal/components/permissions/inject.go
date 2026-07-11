@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
 
 	"github.com/gentleman-programming/gentle-ai/internal/agents"
 	"github.com/gentleman-programming/gentle-ai/internal/components/filemerge"
@@ -236,7 +238,11 @@ func injectCodexPermissions(homeDir string, adapter agents.Adapter) (InjectionRe
 		merged = filemerge.UpsertTOMLTableKey(merged, `permissions.gentle-dev.filesystem.":workspace_roots"`, path, `"deny"`)
 	}
 
-	merged = filemerge.UpsertTOMLTableKey(merged, "permissions.gentle-dev.workspace_roots", `"~"`, "true")
+	if codexPermissionsGOOS == "windows" {
+		merged = removeCodexHomeWorkspaceRoot(merged)
+	} else {
+		merged = filemerge.UpsertTOMLTableKey(merged, "permissions.gentle-dev.workspace_roots", `"~"`, "true")
+	}
 
 	writeResult, err := filemerge.WriteFileAtomic(configPath, []byte(merged), 0o644)
 	if err != nil {
@@ -244,6 +250,166 @@ func injectCodexPermissions(homeDir string, adapter agents.Adapter) (InjectionRe
 	}
 
 	return InjectionResult{Changed: writeResult.Changed, Files: []string{configPath}}, nil
+}
+
+func removeCodexHomeWorkspaceRoot(content string) string {
+	targetPath := []string{"permissions", "gentle-dev", "workspace_roots", "~"}
+	var tablePath []string
+	lines := strings.SplitAfter(content, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if path, ok := parseTOMLTableHeader(line); ok {
+			tablePath = path
+			kept = append(kept, line)
+			continue
+		}
+		keyPath, ok := parseTOMLAssignmentKey(line)
+		if ok && equalTOMLKeyPath(append(tablePath, keyPath...), targetPath) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+
+	return strings.Join(kept, "")
+}
+
+func parseTOMLTableHeader(line string) ([]string, bool) {
+	code := strings.TrimSpace(tomlCodeBeforeComment(line))
+	if len(code) < 3 || code[0] != '[' {
+		return nil, false
+	}
+
+	if strings.HasPrefix(code, "[[") {
+		if len(code) < 5 || !strings.HasSuffix(code, "]]") {
+			return nil, false
+		}
+		return parseTOMLKeyPath(code[2 : len(code)-2])
+	}
+	if !strings.HasSuffix(code, "]") {
+		return nil, false
+	}
+	return parseTOMLKeyPath(code[1 : len(code)-1])
+}
+
+func parseTOMLAssignmentKey(line string) ([]string, bool) {
+	code := tomlCodeBeforeComment(line)
+	equals := tomlIndexOutsideQuotes(code, '=')
+	if equals == -1 {
+		return nil, false
+	}
+	return parseTOMLKeyPath(code[:equals])
+}
+
+func tomlCodeBeforeComment(line string) string {
+	if comment := tomlIndexOutsideQuotes(line, '#'); comment != -1 {
+		return line[:comment]
+	}
+	return line
+}
+
+func tomlIndexOutsideQuotes(text string, target byte) int {
+	var quote byte
+	escaped := false
+	for i := 0; i < len(text); i++ {
+		char := text[i]
+		if quote == '"' && escaped {
+			escaped = false
+			continue
+		}
+		if quote == '"' && char == '\\' {
+			escaped = true
+			continue
+		}
+		if char == '"' || char == '\'' {
+			if quote == 0 {
+				quote = char
+			} else if quote == char {
+				quote = 0
+			}
+			continue
+		}
+		if quote == 0 && char == target {
+			return i
+		}
+	}
+	return -1
+}
+
+func parseTOMLKeyPath(text string) ([]string, bool) {
+	var path []string
+	for pos := 0; ; {
+		pos = skipTOMLKeyWhitespace(text, pos)
+		part, next, ok := parseTOMLKeyPart(text, pos)
+		if !ok {
+			return nil, false
+		}
+		path = append(path, part)
+		pos = skipTOMLKeyWhitespace(text, next)
+		if pos == len(text) {
+			return path, true
+		}
+		if text[pos] != '.' {
+			return nil, false
+		}
+		pos++
+	}
+}
+
+func skipTOMLKeyWhitespace(text string, pos int) int {
+	for pos < len(text) && (text[pos] == ' ' || text[pos] == '\t') {
+		pos++
+	}
+	return pos
+}
+
+func parseTOMLKeyPart(text string, pos int) (string, int, bool) {
+	if pos >= len(text) {
+		return "", pos, false
+	}
+	if text[pos] == '\'' {
+		if end := strings.IndexByte(text[pos+1:], '\''); end != -1 {
+			return text[pos+1 : pos+1+end], pos + end + 2, true
+		}
+		return "", pos, false
+	}
+	if text[pos] == '"' {
+		for end := pos + 1; end < len(text); end++ {
+			if text[end] == '\\' {
+				end++
+				continue
+			}
+			if text[end] == '"' {
+				value, err := strconv.Unquote(text[pos : end+1])
+				return value, end + 1, err == nil
+			}
+		}
+		return "", pos, false
+	}
+
+	end := pos
+	for end < len(text) && isBareTOMLKeyByte(text[end]) {
+		end++
+	}
+	if end == pos {
+		return "", pos, false
+	}
+	return text[pos:end], end, true
+}
+
+func isBareTOMLKeyByte(char byte) bool {
+	return char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '_' || char == '-'
+}
+
+func equalTOMLKeyPath(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func mergeJSONFile(path string, overlay []byte) (filemerge.WriteResult, error) {
