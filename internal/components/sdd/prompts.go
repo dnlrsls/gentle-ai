@@ -6,6 +6,12 @@ import (
 
 	"github.com/gentleman-programming/gentle-ai/internal/assets"
 	"github.com/gentleman-programming/gentle-ai/internal/components/filemerge"
+	"github.com/gentleman-programming/gentle-ai/internal/model"
+)
+
+const (
+	claudeCodeGraphToolGrant = "mcp__codegraph__codegraph_explore"
+	kiroCodeGraphToolGrant   = "@codegraph"
 )
 
 // readSkillContent reads the embedded skill content for the given phase.
@@ -92,6 +98,45 @@ func injectCodeGraphGuidanceIntoPrompt(prompt, guidance string) string {
 		return prompt
 	}
 	return filemerge.InjectMarkdownSection(prompt, "codegraph-guidance", guidance)
+}
+
+func injectCodeGraphToolGrantIntoPrompt(prompt string, agentID model.AgentID, guidance string) string {
+	if strings.TrimSpace(guidance) == "" {
+		return prompt
+	}
+
+	grant := ""
+	switch agentID {
+	case model.AgentClaudeCode:
+		grant = claudeCodeGraphToolGrant
+	case model.AgentKiroIDE:
+		grant = kiroCodeGraphToolGrant
+	default:
+		return prompt
+	}
+
+	frontmatterEnd := strings.Index(prompt, "\n---\n")
+	if frontmatterEnd < 0 {
+		return prompt
+	}
+	lines := strings.Split(prompt[:frontmatterEnd], "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "tools:") {
+			continue
+		}
+		if strings.Contains(line, grant) {
+			return prompt
+		}
+		if agentID == model.AgentClaudeCode {
+			lines[i] = line + ", " + grant
+		} else if strings.HasSuffix(line, "]") {
+			lines[i] = strings.TrimSuffix(line, "]") + `, "` + grant + `"]`
+		} else {
+			return prompt
+		}
+		return strings.Join(lines, "\n") + prompt[frontmatterEnd:]
+	}
+	return prompt
 }
 
 func isMarkdownSubAgentPromptFile(fileName string) bool {
