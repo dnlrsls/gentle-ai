@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/gentleman-programming/gentle-ai/internal/agents"
+	"github.com/gentleman-programming/gentle-ai/internal/assets"
 	"github.com/gentleman-programming/gentle-ai/internal/components/communitytool"
 	"github.com/gentleman-programming/gentle-ai/internal/model"
 )
@@ -52,36 +55,58 @@ func agentPrompt(t *testing.T, agentsMap map[string]any, agentName string) strin
 	return prompt
 }
 
-func sddInstalledSubAgentsForCodeGraphTest() []string {
-	agents := append([]string{}, SharedPromptPhases()...)
-	agents = append(agents, sddJudgmentDaySubAgentsForCodeGraphTest()...)
-	agents = append(agents, sddReviewSubAgentsForCodeGraphTest()...)
-	return agents
+func inlineOpenCodeSubAgentsForCodeGraphTest(t *testing.T, agentsMap map[string]any) []string {
+	t.Helper()
+	names := make([]string, 0, len(agentsMap))
+	for name, agentRaw := range agentsMap {
+		agentMap, ok := agentRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if mode, _ := agentMap["mode"].(string); mode == "primary" {
+			continue
+		}
+		prompt, ok := agentMap["prompt"].(string)
+		if !ok || strings.HasPrefix(prompt, "{file:") {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		t.Fatal("generated OpenCode settings contain no inline subagents")
+	}
+	return names
 }
 
-func sddJudgmentDaySubAgentsForCodeGraphTest() []string {
-	return []string{
-		"jd-judge-a",
-		"jd-judge-b",
-		"jd-fix-agent",
+func nativeMarkdownSubAgentFilesForCodeGraphTest(t *testing.T, adapter agents.Adapter) []string {
+	t.Helper()
+	entries, err := assets.FS.ReadDir(adapter.EmbeddedSubAgentsDir())
+	if err != nil {
+		t.Fatalf("ReadDir(%q) error = %v", adapter.EmbeddedSubAgentsDir(), err)
 	}
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && isMarkdownSubAgentPromptFile(entry.Name()) {
+			files = append(files, entry.Name())
+		}
+	}
+	return files
 }
 
-func sddReviewSubAgentsForCodeGraphTest() []string {
-	return []string{
-		"review-risk",
-		"review-readability",
-		"review-reliability",
-		"review-resilience",
+func frontmatterToolsLineForCodeGraphTest(t *testing.T, content string) string {
+	t.Helper()
+	frontmatterEnd := strings.Index(strings.TrimPrefix(content, "---\n"), "\n---\n")
+	if !strings.HasPrefix(content, "---\n") || frontmatterEnd < 0 {
+		t.Fatal("content missing YAML frontmatter")
 	}
-}
-
-func nativeMarkdownSubAgentsForCodeGraphTest(agentID model.AgentID) []string {
-	agents := sddInstalledSubAgentsForCodeGraphTest()
-	if agentID == model.AgentCursor || agentID == model.AgentKimi {
-		return withoutStrings(agents, sddJudgmentDaySubAgentsForCodeGraphTest()...)
+	for _, line := range strings.Split(content[:len("---\n")+frontmatterEnd], "\n") {
+		if strings.HasPrefix(line, "tools:") {
+			return line
+		}
 	}
-	return agents
+	t.Fatal("frontmatter missing tools line")
+	return ""
 }
 
 func kimiYAMLSubagentFilesForCodeGraphTest() []string {
@@ -394,7 +419,7 @@ func TestInjectOpenCodeSingleModeSubagentPromptsOmitCodeGraphGuidanceByDefault(t
 	}
 
 	agentsMap := readOpenCodeAgents(t, filepath.Join(home, ".config", "opencode", "opencode.json"))
-	for _, agentName := range sddInstalledSubAgentsForCodeGraphTest() {
+	for _, agentName := range inlineOpenCodeSubAgentsForCodeGraphTest(t, agentsMap) {
 		prompt := agentPrompt(t, agentsMap, agentName)
 		if strings.Contains(prompt, "<!-- gentle-ai:codegraph-guidance -->") || strings.Contains(prompt, "gentle-ai codegraph init --cwd <project-root>") {
 			t.Fatalf("%s unexpectedly contains CodeGraph guidance by default", agentName)
@@ -405,13 +430,16 @@ func TestInjectOpenCodeSingleModeSubagentPromptsOmitCodeGraphGuidanceByDefault(t
 func TestInjectOpenCodeSingleModeSubagentPromptsIncludeCodeGraphGuidanceWhenEnabled(t *testing.T) {
 	home := t.TempDir()
 	mockNoPackageManager(t)
+	options := InjectOptions{CodeGraphGuidanceMarkdown: communitytool.CodeGraphGuidanceMarkdown()}
 
-	if _, err := Inject(home, opencodeAdapter(), model.SDDModeSingle, InjectOptions{CodeGraphGuidanceMarkdown: communitytool.CodeGraphGuidanceMarkdown()}); err != nil {
+	if _, err := Inject(home, opencodeAdapter(), model.SDDModeSingle, options); err != nil {
 		t.Fatalf("Inject(single) error = %v", err)
 	}
 
-	agentsMap := readOpenCodeAgents(t, filepath.Join(home, ".config", "opencode", "opencode.json"))
-	for _, agentName := range sddInstalledSubAgentsForCodeGraphTest() {
+	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	agentsMap := readOpenCodeAgents(t, settingsPath)
+	covered := inlineOpenCodeSubAgentsForCodeGraphTest(t, agentsMap)
+	for _, agentName := range covered {
 		prompt := agentPrompt(t, agentsMap, agentName)
 		if !strings.Contains(prompt, "<!-- gentle-ai:codegraph-guidance -->") || !strings.Contains(prompt, "gentle-ai codegraph init --cwd <project-root>") {
 			t.Fatalf("%s missing CodeGraph guidance when enabled", agentName)
@@ -420,16 +448,40 @@ func TestInjectOpenCodeSingleModeSubagentPromptsIncludeCodeGraphGuidanceWhenEnab
 			t.Fatalf("%s has %d CodeGraph guidance sections, want 1", agentName, count)
 		}
 	}
+	if !containsString(covered, reviewRefuterAgentName) {
+		t.Fatalf("generated OpenCode subagent coverage missing %s", reviewRefuterAgentName)
+	}
+
+	beforeSecond, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) before second injection error = %v", settingsPath, err)
+	}
+	second, err := Inject(home, opencodeAdapter(), model.SDDModeSingle, options)
+	if err != nil {
+		t.Fatalf("Inject(single) second error = %v", err)
+	}
+	if second.Changed {
+		t.Fatal("Inject(single) second changed = true, want idempotent output")
+	}
+	afterSecond, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) after second injection error = %v", settingsPath, err)
+	}
+	if string(afterSecond) != string(beforeSecond) {
+		t.Fatal("Inject(single) second invocation altered generated OpenCode agent content")
+	}
 }
 
 func TestInjectOpenCodeMultiModeSubagentPromptFilesIncludeCodeGraphGuidanceWhenEnabled(t *testing.T) {
 	home := t.TempDir()
 	mockNoPackageManager(t)
+	options := InjectOptions{CodeGraphGuidanceMarkdown: communitytool.CodeGraphGuidanceMarkdown()}
 
-	if _, err := Inject(home, opencodeAdapter(), model.SDDModeMulti, InjectOptions{CodeGraphGuidanceMarkdown: communitytool.CodeGraphGuidanceMarkdown()}); err != nil {
+	if _, err := Inject(home, opencodeAdapter(), model.SDDModeMulti, options); err != nil {
 		t.Fatalf("Inject(multi) error = %v", err)
 	}
 
+	promptContents := make(map[string]string, len(SharedPromptPhases()))
 	for _, phase := range SharedPromptPhases() {
 		path := filepath.Join(SharedPromptDir(home), phase+".md")
 		content, err := os.ReadFile(path)
@@ -440,26 +492,166 @@ func TestInjectOpenCodeMultiModeSubagentPromptFilesIncludeCodeGraphGuidanceWhenE
 		if !strings.Contains(text, "<!-- gentle-ai:codegraph-guidance -->") || !strings.Contains(text, "gentle-ai codegraph init --cwd <project-root>") {
 			t.Fatalf("%s missing CodeGraph guidance when enabled", phase)
 		}
+		if count := strings.Count(text, "<!-- gentle-ai:codegraph-guidance -->"); count != 1 {
+			t.Fatalf("%s has %d CodeGraph guidance sections, want 1", phase, count)
+		}
+		promptContents[path] = text
 	}
 
-	agentsMap := readOpenCodeAgents(t, filepath.Join(home, ".config", "opencode", "opencode.json"))
-	inlineSubagents := append(sddJudgmentDaySubAgentsForCodeGraphTest(), sddReviewSubAgentsForCodeGraphTest()...)
-	for _, agentName := range inlineSubagents {
+	settingsPath := filepath.Join(home, ".config", "opencode", "opencode.json")
+	agentsMap := readOpenCodeAgents(t, settingsPath)
+	covered := inlineOpenCodeSubAgentsForCodeGraphTest(t, agentsMap)
+	for _, agentName := range covered {
 		prompt := agentPrompt(t, agentsMap, agentName)
 		if !strings.Contains(prompt, "<!-- gentle-ai:codegraph-guidance -->") || !strings.Contains(prompt, "gentle-ai codegraph init --cwd <project-root>") {
 			t.Fatalf("%s missing CodeGraph guidance in multi-mode inline prompt when enabled", agentName)
 		}
+		if count := strings.Count(prompt, "<!-- gentle-ai:codegraph-guidance -->"); count != 1 {
+			t.Fatalf("%s has %d CodeGraph guidance sections in multi-mode inline prompt, want 1", agentName, count)
+		}
+	}
+	if !containsString(covered, reviewRefuterAgentName) {
+		t.Fatalf("generated OpenCode subagent coverage missing %s", reviewRefuterAgentName)
+	}
+
+	settingsBeforeSecond, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) before second injection error = %v", settingsPath, err)
+	}
+	second, err := Inject(home, opencodeAdapter(), model.SDDModeMulti, options)
+	if err != nil {
+		t.Fatalf("Inject(multi) second error = %v", err)
+	}
+	if second.Changed {
+		t.Fatal("Inject(multi) second changed = true, want idempotent output")
+	}
+	settingsAfterSecond, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) after second injection error = %v", settingsPath, err)
+	}
+	if string(settingsAfterSecond) != string(settingsBeforeSecond) {
+		t.Fatal("Inject(multi) second invocation altered generated OpenCode agent content")
+	}
+	for path, beforeSecond := range promptContents {
+		afterSecond, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q) after second injection error = %v", path, err)
+		}
+		if string(afterSecond) != beforeSecond {
+			t.Fatalf("Inject(multi) second invocation altered generated prompt %q", path)
+		}
+	}
+}
+
+func TestInjectCodeGraphToolGrantIntoPrompt(t *testing.T) {
+	guidance := "CodeGraph guidance"
+	tests := []struct {
+		name    string
+		agentID model.AgentID
+		prompt  string
+		want    string
+		wantErr string
+	}{
+		{
+			name:    "Claude preserves LF frontmatter and existing tools",
+			agentID: model.AgentClaudeCode,
+			prompt:  "---\nname: test\ntools: Read, Grep\nmodel: sonnet\n---\nBody\n",
+			want:    "---\nname: test\ntools: Read, Grep, mcp__codegraph__codegraph_explore\nmodel: sonnet\n---\nBody\n",
+		},
+		{
+			name:    "Claude preserves CRLF frontmatter and body",
+			agentID: model.AgentClaudeCode,
+			prompt:  "---\r\nname: test\r\ntools: Read\r\n---\r\nBody\r\n",
+			want:    "---\r\nname: test\r\ntools: Read, mcp__codegraph__codegraph_explore\r\n---\r\nBody\r\n",
+		},
+		{
+			name:    "Claude accepts an empty tools declaration",
+			agentID: model.AgentClaudeCode,
+			prompt:  "---\ntools:\n---\nBody\n",
+			want:    "---\ntools: mcp__codegraph__codegraph_explore\n---\nBody\n",
+		},
+		{
+			name:    "Kiro accepts an empty tools list",
+			agentID: model.AgentKiroIDE,
+			prompt:  "---\ntools: []\n---\nBody\n",
+			want:    "---\ntools: [\"@codegraph\"]\n---\nBody\n",
+		},
+		{
+			name:    "Kiro preserves existing tools and frontmatter",
+			agentID: model.AgentKiroIDE,
+			prompt:  "---\nname: test\ntools: [\"read\"]\nmodel: auto\n---\nBody\n",
+			want:    "---\nname: test\ntools: [\"read\", \"@codegraph\"]\nmodel: auto\n---\nBody\n",
+		},
+		{
+			name:    "missing frontmatter fails explicitly",
+			agentID: model.AgentClaudeCode,
+			prompt:  "tools: Read\nBody\n",
+			wantErr: "missing YAML frontmatter opening delimiter",
+		},
+		{
+			name:    "malformed frontmatter fails explicitly",
+			agentID: model.AgentClaudeCode,
+			prompt:  "---\ntools: Read\nBody\n",
+			wantErr: "missing YAML frontmatter closing delimiter",
+		},
+		{
+			name:    "missing tools fails explicitly",
+			agentID: model.AgentClaudeCode,
+			prompt:  "---\nname: test\n---\nBody\n",
+			wantErr: "missing tools declaration",
+		},
+		{
+			name:    "malformed Claude tools fails explicitly",
+			agentID: model.AgentClaudeCode,
+			prompt:  "---\ntools: Read,\n---\nBody\n",
+			wantErr: "malformed Claude tools declaration",
+		},
+		{
+			name:    "malformed Kiro tools fails explicitly",
+			agentID: model.AgentKiroIDE,
+			prompt:  "---\ntools: [\"read\"\n---\nBody\n",
+			wantErr: "malformed Kiro tools declaration",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := injectCodeGraphToolGrantIntoPrompt(tc.prompt, tc.agentID, guidance)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
+				}
+				if got != tc.prompt {
+					t.Fatalf("failed mutation changed prompt:\n%s", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("result mismatch:\ngot:  %q\nwant: %q", got, tc.want)
+			}
+			gotAgain, err := injectCodeGraphToolGrantIntoPrompt(got, tc.agentID, guidance)
+			if err != nil {
+				t.Fatalf("idempotence call error: %v", err)
+			}
+			if gotAgain != got {
+				t.Fatalf("second mutation changed prompt:\n%s", gotAgain)
+			}
+		})
 	}
 }
 
 func TestInjectNativeSDDSubagentsIncludeCodeGraphGuidanceWhenEnabled(t *testing.T) {
 	tests := []struct {
-		name    string
-		agentID model.AgentID
+		name      string
+		agentID   model.AgentID
+		toolGrant string
 	}{
-		{name: "claude", agentID: model.AgentClaudeCode},
+		{name: "claude", agentID: model.AgentClaudeCode, toolGrant: "mcp__codegraph__codegraph_explore"},
 		{name: "cursor", agentID: model.AgentCursor},
-		{name: "kiro", agentID: model.AgentKiroIDE},
+		{name: "kiro", agentID: model.AgentKiroIDE, toolGrant: "@codegraph"},
 		{name: "kimi", agentID: model.AgentKimi},
 	}
 
@@ -472,44 +664,219 @@ func TestInjectNativeSDDSubagentsIncludeCodeGraphGuidanceWhenEnabled(t *testing.
 				t.Fatalf("Inject(%s) error = %v", tc.name, err)
 			}
 
-			for _, agentName := range nativeMarkdownSubAgentsForCodeGraphTest(tc.agentID) {
-				path := filepath.Join(adapter.SubAgentsDir(home), agentName+".md")
+			for _, fileName := range nativeMarkdownSubAgentFilesForCodeGraphTest(t, adapter) {
+				path := filepath.Join(adapter.SubAgentsDir(home), fileName)
 				content, err := os.ReadFile(path)
 				if err != nil {
 					t.Fatalf("ReadFile(%q) error = %v", path, err)
 				}
 				text := string(content)
 				if !strings.Contains(text, "<!-- gentle-ai:codegraph-guidance -->") || !strings.Contains(text, "gentle-ai codegraph init --cwd <project-root>") {
-					t.Fatalf("%s native subagent missing CodeGraph guidance when enabled", agentName)
+					t.Fatalf("%s native subagent missing CodeGraph guidance when enabled", fileName)
 				}
+				if count := strings.Count(text, "<!-- gentle-ai:codegraph-guidance -->"); count != 1 {
+					t.Fatalf("%s has %d CodeGraph guidance sections, want 1", fileName, count)
+				}
+
+				toolsLine := ""
+				if tc.toolGrant != "" {
+					toolsLine = frontmatterToolsLineForCodeGraphTest(t, text)
+				}
+				for _, grant := range []string{"mcp__codegraph__codegraph_explore", "@codegraph"} {
+					wantCount := 0
+					if grant == tc.toolGrant {
+						wantCount = 1
+					}
+					if count := strings.Count(text, grant); count != wantCount {
+						t.Fatalf("%s tools line has %d %q grants, want %d: %s", fileName, count, grant, wantCount, toolsLine)
+					}
+				}
+
+				if tc.toolGrant != "" {
+					source := renderBoundedReviewAsset(adapter.EmbeddedSubAgentsDir() + "/" + fileName)
+					sourceToolsLine := frontmatterToolsLineForCodeGraphTest(t, source)
+					wantToolsLine := sourceToolsLine + ", " + tc.toolGrant
+					if tc.agentID == model.AgentKiroIDE {
+						wantToolsLine = strings.TrimSuffix(sourceToolsLine, "]") + `, "` + tc.toolGrant + `"]`
+					}
+					if toolsLine != wantToolsLine {
+						t.Fatalf("%s tools line = %q, want preserved tools plus grant %q", fileName, toolsLine, wantToolsLine)
+					}
+					if strings.Count(toolsLine, "Bash") != strings.Count(sourceToolsLine, "Bash") {
+						t.Fatalf("%s CodeGraph grant changed Bash access: before %q, after %q", fileName, sourceToolsLine, toolsLine)
+					}
+				}
+			}
+
+			second, err := Inject(home, adapter, model.SDDModeSingle, InjectOptions{CodeGraphGuidanceMarkdown: communitytool.CodeGraphGuidanceMarkdown()})
+			if err != nil {
+				t.Fatalf("Inject(%s) second error = %v", tc.name, err)
+			}
+			if second.Changed {
+				t.Fatalf("Inject(%s) second changed = true, want idempotent output", tc.name)
 			}
 		})
 	}
+}
 
-	for _, agentName := range []string{"jd-judge-a", "review-risk"} {
-		if !containsString(nativeMarkdownSubAgentsForCodeGraphTest(model.AgentClaudeCode), agentName) {
-			t.Fatalf("native coverage helper missing %s", agentName)
+func TestInjectNativeSDDSubagentsMalformedLaterPromptLeavesBatchUnchanged(t *testing.T) {
+	home := t.TempDir()
+	adapter := claudeAdapter()
+	if _, err := Inject(home, adapter, model.SDDModeSingle); err != nil {
+		t.Fatalf("Inject(claude) baseline error = %v", err)
+	}
+
+	fileNames := nativeMarkdownSubAgentFilesForCodeGraphTest(t, adapter)
+	if len(fileNames) < 2 {
+		t.Fatalf("native Markdown prompt count = %d, want at least 2", len(fileNames))
+	}
+	before := make(map[string]string, len(fileNames))
+	for _, fileName := range fileNames {
+		path := filepath.Join(adapter.SubAgentsDir(home), fileName)
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile(%q) before failed batch error = %v", path, err)
+		}
+		before[path] = string(content)
+	}
+
+	laterFile := fileNames[1]
+	originalRenderer := renderNativeSubAgentAsset
+	renderNativeSubAgentAsset = func(path string) string {
+		if filepath.Base(path) == laterFile {
+			return "---\ntools: Read\nmissing closing delimiter\n"
+		}
+		return originalRenderer(path)
+	}
+	t.Cleanup(func() { renderNativeSubAgentAsset = originalRenderer })
+
+	result, err := Inject(home, adapter, model.SDDModeSingle, InjectOptions{CodeGraphGuidanceMarkdown: communitytool.CodeGraphGuidanceMarkdown()})
+	if err == nil {
+		t.Fatal("Inject(claude) malformed later prompt error = nil")
+	}
+	for _, want := range []string{"grant CodeGraph tool in agent " + laterFile, "missing YAML frontmatter closing delimiter"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Inject(claude) error = %q, want containing %q", err, want)
+		}
+	}
+	if result.Changed {
+		t.Fatalf("Inject(claude) changed = true, want false: %+v", result)
+	}
+	for _, path := range result.Files {
+		if filepath.Dir(path) == adapter.SubAgentsDir(home) {
+			t.Fatalf("Inject(claude) result contains partially updated native agent %q", path)
+		}
+	}
+
+	earlyPath := filepath.Join(adapter.SubAgentsDir(home), fileNames[0])
+	if strings.Contains(before[earlyPath], "<!-- gentle-ai:codegraph-guidance -->") {
+		t.Fatalf("early prompt %q unexpectedly had CodeGraph guidance before failed batch", earlyPath)
+	}
+	for path, want := range before {
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("ReadFile(%q) after failed batch error = %v", path, readErr)
+		}
+		if string(content) != want {
+			t.Fatalf("failed native batch changed %q", path)
 		}
 	}
 }
 
-func TestInjectNativeSDDSubagentsOmitCodeGraphGuidanceByDefault(t *testing.T) {
+func TestInjectNativeSDDSubagentsWriteFailureReturnsChangedInventory(t *testing.T) {
 	home := t.TempDir()
-
-	if _, err := Inject(home, claudeAdapter(), model.SDDModeSingle); err != nil {
-		t.Fatalf("Inject(claude) error = %v", err)
+	adapter := claudeAdapter()
+	if _, err := Inject(home, adapter, model.SDDModeSingle); err != nil {
+		t.Fatalf("Inject(claude) baseline error = %v", err)
 	}
 
-	for _, agentName := range nativeMarkdownSubAgentsForCodeGraphTest(model.AgentClaudeCode) {
-		path := filepath.Join(home, ".claude", "agents", agentName+".md")
-		content, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("ReadFile(%q) error = %v", path, err)
-		}
-		text := string(content)
-		if strings.Contains(text, "<!-- gentle-ai:codegraph-guidance -->") || strings.Contains(text, "gentle-ai codegraph init --cwd <project-root>") {
-			t.Fatalf("%s native subagent unexpectedly contains CodeGraph guidance by default", agentName)
-		}
+	fileNames := nativeMarkdownSubAgentFilesForCodeGraphTest(t, adapter)
+	if len(fileNames) < 3 {
+		t.Fatalf("native Markdown prompt count = %d, want at least 3", len(fileNames))
+	}
+	earlyPath := filepath.Join(adapter.SubAgentsDir(home), fileNames[0])
+	failingPath := filepath.Join(adapter.SubAgentsDir(home), fileNames[2])
+	if err := os.Remove(failingPath); err != nil {
+		t.Fatalf("Remove(%q) error = %v", failingPath, err)
+	}
+	if err := os.Mkdir(failingPath, 0o755); err != nil {
+		t.Fatalf("Mkdir(%q) error = %v", failingPath, err)
+	}
+
+	result, err := Inject(home, adapter, model.SDDModeSingle, InjectOptions{CodeGraphGuidanceMarkdown: communitytool.CodeGraphGuidanceMarkdown()})
+	if err == nil || !strings.Contains(err.Error(), "write agent "+fileNames[2]) {
+		t.Fatalf("Inject(claude) error = %v, want write context for %s", err, fileNames[2])
+	}
+	if !result.Changed {
+		t.Fatalf("Inject(claude) changed = false, want partial write inventory: %+v", result)
+	}
+	if !containsString(result.Files, earlyPath) {
+		t.Fatalf("Inject(claude) changed files = %v, want earlier changed file %q", result.Files, earlyPath)
+	}
+	if containsString(result.Files, failingPath) {
+		t.Fatalf("Inject(claude) changed files includes failed target %q", failingPath)
+	}
+}
+
+func TestInjectNativeSDDSubagentsPreserveExistingModeWhenUpdated(t *testing.T) {
+	home := t.TempDir()
+	adapter := claudeAdapter()
+	if _, err := Inject(home, adapter, model.SDDModeSingle); err != nil {
+		t.Fatalf("Inject(claude) baseline error = %v", err)
+	}
+
+	fileNames := nativeMarkdownSubAgentFilesForCodeGraphTest(t, adapter)
+	path := filepath.Join(adapter.SubAgentsDir(home), fileNames[0])
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatalf("Chmod(%q) error = %v", path, err)
+	}
+	result, err := Inject(home, adapter, model.SDDModeSingle, InjectOptions{CodeGraphGuidanceMarkdown: communitytool.CodeGraphGuidanceMarkdown()})
+	if err != nil {
+		t.Fatalf("Inject(claude) update error = %v", err)
+	}
+	if !containsString(result.Files, path) {
+		t.Fatalf("Inject(claude) changed files = %v, want %q", result.Files, path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("updated mode = %o, want 600", got)
+	}
+}
+
+func TestInjectNativeSDDSubagentsOmitCodeGraphGuidanceByDefault(t *testing.T) {
+	for _, agentID := range []model.AgentID{model.AgentClaudeCode, model.AgentKiroIDE} {
+		t.Run(string(agentID), func(t *testing.T) {
+			home := t.TempDir()
+			adapter := mustAdapter(t, agentID)
+			if _, err := Inject(home, adapter, model.SDDModeSingle); err != nil {
+				t.Fatalf("Inject(%s) error = %v", agentID, err)
+			}
+
+			for _, fileName := range nativeMarkdownSubAgentFilesForCodeGraphTest(t, adapter) {
+				path := filepath.Join(adapter.SubAgentsDir(home), fileName)
+				content, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("ReadFile(%q) error = %v", path, err)
+				}
+				text := string(content)
+				if strings.Contains(text, "<!-- gentle-ai:codegraph-guidance -->") || strings.Contains(text, "gentle-ai codegraph init --cwd <project-root>") {
+					t.Fatalf("%s native subagent unexpectedly contains CodeGraph guidance by default", fileName)
+				}
+				for _, grant := range []string{"mcp__codegraph__codegraph_explore", "@codegraph"} {
+					if strings.Contains(frontmatterToolsLineForCodeGraphTest(t, text), grant) {
+						t.Fatalf("%s native subagent unexpectedly grants %q by default", fileName, grant)
+					}
+				}
+
+				source := renderBoundedReviewAsset(adapter.EmbeddedSubAgentsDir() + "/" + fileName)
+				if got, want := frontmatterToolsLineForCodeGraphTest(t, text), frontmatterToolsLineForCodeGraphTest(t, source); got != want {
+					t.Fatalf("%s default tools changed: got %q, want %q", fileName, got, want)
+				}
+			}
+		})
 	}
 }
 

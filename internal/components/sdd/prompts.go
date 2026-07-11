@@ -1,12 +1,22 @@
 package sdd
 
 import (
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/gentleman-programming/gentle-ai/internal/assets"
 	"github.com/gentleman-programming/gentle-ai/internal/components/filemerge"
+	"github.com/gentleman-programming/gentle-ai/internal/model"
 )
+
+const (
+	claudeCodeGraphToolGrant = "mcp__codegraph__codegraph_explore"
+	kiroCodeGraphToolGrant   = "@codegraph"
+)
+
+var renderNativeSubAgentAsset = renderBoundedReviewAsset
 
 // readSkillContent reads the embedded skill content for the given phase.
 func readSkillContent(phase string) (string, error) {
@@ -92,6 +102,93 @@ func injectCodeGraphGuidanceIntoPrompt(prompt, guidance string) string {
 		return prompt
 	}
 	return filemerge.InjectMarkdownSection(prompt, "codegraph-guidance", guidance)
+}
+
+func injectCodeGraphToolGrantIntoPrompt(prompt string, agentID model.AgentID, guidance string) (string, error) {
+	if strings.TrimSpace(guidance) == "" {
+		return prompt, nil
+	}
+
+	var grant string
+	switch agentID {
+	case model.AgentClaudeCode:
+		grant = claudeCodeGraphToolGrant
+	case model.AgentKiroIDE:
+		grant = kiroCodeGraphToolGrant
+	default:
+		return prompt, nil
+	}
+
+	newline := "\n"
+	if strings.HasPrefix(prompt, "---\r\n") {
+		newline = "\r\n"
+	} else if !strings.HasPrefix(prompt, "---\n") {
+		return prompt, fmt.Errorf("missing YAML frontmatter opening delimiter")
+	}
+
+	frontmatterStart := len("---" + newline)
+	frontmatterEndOffset := strings.Index(prompt[frontmatterStart:], newline+"---"+newline)
+	if frontmatterEndOffset < 0 {
+		return prompt, fmt.Errorf("missing YAML frontmatter closing delimiter")
+	}
+	frontmatterEnd := frontmatterStart + frontmatterEndOffset
+	lines := strings.Split(prompt[frontmatterStart:frontmatterEnd], newline)
+	toolsLineIndex := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "tools:") {
+			if toolsLineIndex >= 0 {
+				return prompt, fmt.Errorf("multiple tools declarations in YAML frontmatter")
+			}
+			toolsLineIndex = i
+			continue
+		}
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "tools:") {
+			return prompt, fmt.Errorf("tools declaration must be unindented")
+		}
+	}
+	if toolsLineIndex < 0 {
+		return prompt, fmt.Errorf("missing tools declaration in YAML frontmatter")
+	}
+
+	toolsLine := lines[toolsLineIndex]
+	value := strings.TrimSpace(strings.TrimPrefix(toolsLine, "tools:"))
+	switch agentID {
+	case model.AgentClaudeCode:
+		if value == "" {
+			lines[toolsLineIndex] = "tools: " + grant
+			break
+		}
+		tools := strings.Split(value, ",")
+		for _, tool := range tools {
+			tool = strings.TrimSpace(tool)
+			if tool == "" {
+				return prompt, fmt.Errorf("malformed Claude tools declaration")
+			}
+			if tool == grant {
+				return prompt, nil
+			}
+		}
+		lines[toolsLineIndex] = toolsLine + ", " + grant
+	case model.AgentKiroIDE:
+		var tools []string
+		if err := json.Unmarshal([]byte(value), &tools); err != nil || tools == nil {
+			return prompt, fmt.Errorf("malformed Kiro tools declaration")
+		}
+		for _, tool := range tools {
+			if tool == grant {
+				return prompt, nil
+			}
+		}
+		closingBracket := strings.LastIndex(toolsLine, "]")
+		if len(tools) == 0 {
+			lines[toolsLineIndex] = toolsLine[:closingBracket] + `"` + grant + `"` + toolsLine[closingBracket:]
+		} else {
+			lines[toolsLineIndex] = toolsLine[:closingBracket] + `, "` + grant + `"` + toolsLine[closingBracket:]
+		}
+	}
+
+	updatedFrontmatter := strings.Join(lines, newline)
+	return prompt[:frontmatterStart] + updatedFrontmatter + prompt[frontmatterEnd:], nil
 }
 
 func isMarkdownSubAgentPromptFile(fileName string) bool {

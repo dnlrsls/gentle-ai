@@ -22,6 +22,13 @@ type InjectionResult struct {
 	Files   []string
 }
 
+type preparedNativeSubAgentFile struct {
+	name    string
+	path    string
+	content string
+	mode    fs.FileMode
+}
+
 type InjectOptions struct {
 	OpenCodeModelAssignments map[string]model.ModelAssignment
 	// ClaudeModelAssignments is the legacy model-only Claude assignment map.
@@ -652,22 +659,19 @@ func Inject(homeDir string, adapter agents.Adapter, sddMode model.SDDModeID, opt
 	var agentsDir string
 	if adapter.SupportsSubAgents() {
 		agentsDir = adapter.SubAgentsDir(homeDir)
-		if err := os.MkdirAll(agentsDir, 0o755); err != nil {
-			return InjectionResult{}, fmt.Errorf("create agents dir: %w", err)
-		}
-
 		embeddedDir := adapter.EmbeddedSubAgentsDir()
 		entries, err := assets.FS.ReadDir(embeddedDir)
 		if err != nil {
-			return InjectionResult{}, fmt.Errorf("read embedded agents dir: %w", err)
+			return InjectionResult{Changed: changed, Files: files}, fmt.Errorf("read embedded agents dir: %w", err)
 		}
 
+		prepared := make([]preparedNativeSubAgentFile, 0, len(entries))
 		for _, entry := range entries {
 			if entry.IsDir() {
 				continue
 			}
 			// Copy all files (not just .md) to support Kimi's YAML-based agents
-			contentStr := renderBoundedReviewAsset(embeddedDir + "/" + entry.Name())
+			contentStr := renderNativeSubAgentAsset(embeddedDir + "/" + entry.Name())
 
 			// Resolve {{KIRO_MODEL}} placeholder for adapters that support it (e.g. Kiro).
 			// Non-Kiro adapters (Cursor, etc.) don't implement kiroModelResolver and are unaffected.
@@ -701,16 +705,38 @@ func Inject(homeDir string, adapter agents.Adapter, sddMode model.SDDModeID, opt
 			}
 
 			if isMarkdownSubAgentPromptFile(entry.Name()) {
+				contentStr, err = injectCodeGraphToolGrantIntoPrompt(contentStr, adapter.Agent(), opts.CodeGraphGuidanceMarkdown)
+				if err != nil {
+					return InjectionResult{Changed: changed, Files: files}, fmt.Errorf("grant CodeGraph tool in agent %s: %w", entry.Name(), err)
+				}
 				contentStr = injectCodeGraphGuidanceIntoPrompt(contentStr, opts.CodeGraphGuidanceMarkdown)
 			}
 			outPath := filepath.Join(agentsDir, entry.Name())
-			writeResult, err := filemerge.WriteFileAtomic(outPath, []byte(contentStr), 0o644)
+			mode := fs.FileMode(0o644)
+			if info, statErr := os.Stat(outPath); statErr == nil {
+				mode = info.Mode().Perm()
+			} else if !os.IsNotExist(statErr) {
+				return InjectionResult{Changed: changed, Files: files}, fmt.Errorf("stat agent %s: %w", entry.Name(), statErr)
+			}
+			prepared = append(prepared, preparedNativeSubAgentFile{
+				name:    entry.Name(),
+				path:    outPath,
+				content: contentStr,
+				mode:    mode,
+			})
+		}
+
+		if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+			return InjectionResult{Changed: changed, Files: files}, fmt.Errorf("create agents dir: %w", err)
+		}
+		for _, candidate := range prepared {
+			writeResult, err := filemerge.WriteFileAtomic(candidate.path, []byte(candidate.content), candidate.mode)
 			if err != nil {
-				return InjectionResult{}, fmt.Errorf("write agent %s: %w", entry.Name(), err)
+				return InjectionResult{Changed: changed, Files: files}, fmt.Errorf("write agent %s: %w", candidate.name, err)
 			}
 			changed = changed || writeResult.Changed
 			if writeResult.Changed {
-				files = append(files, outPath)
+				files = append(files, candidate.path)
 			}
 		}
 
