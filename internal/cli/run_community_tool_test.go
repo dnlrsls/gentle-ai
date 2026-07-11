@@ -5,12 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gentleman-programming/gentle-ai/internal/components/communitytool"
 	"github.com/gentleman-programming/gentle-ai/internal/model"
+	"github.com/gentleman-programming/gentle-ai/internal/pipeline"
 	"github.com/gentleman-programming/gentle-ai/internal/planner"
 	"github.com/gentleman-programming/gentle-ai/internal/system"
 )
@@ -35,6 +37,26 @@ func TestInstallRuntimeStagePlanAddsCommunityToolStepsInSelectionOrder(t *testin
 	want := []string{"apply:rollback-restore", "community-tool:codegraph"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("apply step IDs = %#v, want %#v", got, want)
+	}
+}
+
+func TestInstallRuntimeStagePlanKeepsPiReconcileIndependentFromOpenCode(t *testing.T) {
+	runtime := &installRuntime{
+		homeDir:      t.TempDir(),
+		workspaceDir: "/work/project",
+		selection: model.Selection{
+			CommunityTools: []model.CommunityToolID{model.CommunityToolCodeGraph},
+		},
+		resolved: planner.ResolvedPlan{Agents: []model.AgentID{model.AgentOpenCode, model.AgentPi}},
+		profile:  system.PlatformProfile{},
+		state:    &runtimeState{},
+	}
+
+	plan := runtime.stagePlan()
+	if !slices.ContainsFunc(plan.Apply, func(step pipeline.Step) bool {
+		return step.ID() == "community-tool:pi-codegraph-reconcile"
+	}) {
+		t.Fatal("install plan with OpenCode and Pi must keep independent Pi CodeGraph reconciliation")
 	}
 }
 
@@ -146,6 +168,38 @@ func TestPiCodeGraphReconcileStepRollbackRemovesDynamicPackageOverlay(t *testing
 	}
 	if _, err := os.Stat(overlay); !os.IsNotExist(err) {
 		t.Fatalf("dynamic package overlay remains after later pipeline rollback: %v", err)
+	}
+}
+
+func TestPiCodeGraphReconcileStepPreservesOnlyPendingAdapterHealth(t *testing.T) {
+	previous := reconcilePiCodeGraph
+	t.Cleanup(func() { reconcilePiCodeGraph = previous })
+
+	state := &runtimeState{}
+	reconcilePiCodeGraph = func(communitytool.PiCodeGraphOptions) (communitytool.PiCodeGraphResult, error) {
+		return communitytool.PiCodeGraphResult{}, communitytool.ErrPiCodeGraphAdapterHealthUnavailable
+	}
+	if err := (piCodeGraphReconcileStep{selected: true, state: state}).Run(); err != nil {
+		t.Fatalf("piCodeGraphReconcileStep.Run() pending error = %v", err)
+	}
+	if state.piCodeGraph == nil || len(state.piCodeGraph.ManualActions) != 1 || !strings.Contains(state.piCodeGraph.ManualActions[0], "pending") {
+		t.Fatalf("Pi result = %#v, want pending manual action", state.piCodeGraph)
+	}
+
+	wantErr := errors.New("Pi MCP handshake failed")
+	reconcilePiCodeGraph = func(communitytool.PiCodeGraphOptions) (communitytool.PiCodeGraphResult, error) {
+		return communitytool.PiCodeGraphResult{}, wantErr
+	}
+	if err := (piCodeGraphReconcileStep{selected: true, state: &runtimeState{}}).Run(); !errors.Is(err, wantErr) {
+		t.Fatalf("piCodeGraphReconcileStep.Run() error = %v, want %v", err, wantErr)
+	}
+
+	restoreErr := errors.New("restore Pi CodeGraph journal")
+	reconcilePiCodeGraph = func(communitytool.PiCodeGraphOptions) (communitytool.PiCodeGraphResult, error) {
+		return communitytool.PiCodeGraphResult{}, errors.Join(communitytool.ErrPiCodeGraphAdapterHealthUnavailable, restoreErr)
+	}
+	if err := (piCodeGraphReconcileStep{selected: true, state: &runtimeState{}}).Run(); !errors.Is(err, restoreErr) {
+		t.Fatalf("piCodeGraphReconcileStep.Run() joined error = %v, want fatal restore error", err)
 	}
 }
 
@@ -393,6 +447,114 @@ func TestCommunityToolInstallStepPassesRuntimeHomeToPiReconciler(t *testing.T) {
 	}
 }
 
+func TestCommunityToolInstallStepPropagatesInitialPiPendingAction(t *testing.T) {
+	previous := installCommunityToolWithHome
+	t.Cleanup(func() { installCommunityToolWithHome = previous })
+	pending := communitytool.PiCodeGraphResult{ManualActions: []string{"Pi CodeGraph runtime verification is pending."}}
+	installCommunityToolWithHome = func(_ model.CommunityToolID, _ string, _ string, _ communitytool.Runner, _ communitytool.Detector) (communitytool.Result, error) {
+		return communitytool.Result{Tool: model.CommunityToolCodeGraph, PiCodeGraph: &pending}, nil
+	}
+	runtime := &installRuntime{
+		selection: model.Selection{CommunityTools: []model.CommunityToolID{model.CommunityToolCodeGraph}},
+		resolved:  planner.ResolvedPlan{},
+		state:     &runtimeState{},
+	}
+
+	plan := runtime.stagePlan()
+	if err := plan.Apply[1].Run(); err != nil {
+		t.Fatalf("initial CodeGraph install step error = %v", err)
+	}
+	if runtime.state.piCodeGraph == nil || !reflect.DeepEqual(runtime.state.piCodeGraph.ManualActions, pending.ManualActions) {
+		t.Fatalf("pipeline Pi result = %#v, want initial pending action", runtime.state.piCodeGraph)
+	}
+	out := RenderInstallManualActions(InstallResult{PiCodeGraph: runtime.state.piCodeGraph})
+	if !strings.Contains(out, pending.ManualActions[0]) {
+		t.Fatalf("rendered install actions = %q, want initial pending action", out)
+	}
+}
+
+func TestInstallPipelineDoesNotDuplicatePiPendingActionWhenSelected(t *testing.T) {
+	previousInstall := installCommunityToolWithHome
+	previousReconcile := reconcilePiCodeGraph
+	t.Cleanup(func() {
+		installCommunityToolWithHome = previousInstall
+		reconcilePiCodeGraph = previousReconcile
+	})
+	pending := communitytool.PiCodeGraphResult{ManualActions: []string{"Pi CodeGraph runtime verification is pending."}}
+	installCommunityToolWithHome = func(_ model.CommunityToolID, _ string, _ string, _ communitytool.Runner, _ communitytool.Detector) (communitytool.Result, error) {
+		return communitytool.Result{Tool: model.CommunityToolCodeGraph, PiCodeGraph: &pending}, nil
+	}
+	reconcilePiCodeGraph = func(communitytool.PiCodeGraphOptions) (communitytool.PiCodeGraphResult, error) {
+		return pending, nil
+	}
+	installRuntime := &installRuntime{
+		selection: model.Selection{CommunityTools: []model.CommunityToolID{model.CommunityToolCodeGraph}},
+		resolved:  planner.ResolvedPlan{Agents: []model.AgentID{model.AgentPi}},
+		state:     &runtimeState{},
+	}
+
+	for _, step := range installRuntime.stagePlan().Apply[1:] {
+		if step.ID() != "community-tool:codegraph" && step.ID() != "community-tool:pi-codegraph-reconcile" {
+			continue
+		}
+		if err := step.Run(); err != nil {
+			t.Fatalf("install step %q error = %v", step.ID(), err)
+		}
+	}
+	if installRuntime.state.piCodeGraph == nil || !reflect.DeepEqual(installRuntime.state.piCodeGraph.ManualActions, pending.ManualActions) {
+		t.Fatalf("pipeline Pi result = %#v, want one pending action", installRuntime.state.piCodeGraph)
+	}
+}
+
+func TestPiCodeGraphRuntimeKeepsExplicitNegativeOutputFatal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake Pi runtime uses a POSIX script")
+	}
+	tests := []string{
+		"MCP Servers:\n  codegraph: not ready\n",
+		"MCP Servers:\n  codegraph: not running\n",
+		"MCP Servers:\n  codegraph: unloaded\n",
+		"MCP Servers:\n  codegraph: inactive\n",
+		"MCP Servers:\n  codegraph: broken\n",
+		"MCP Servers:\n  codegraph: not connected\n",
+	}
+	for _, output := range tests {
+		t.Run(strings.TrimSpace(strings.TrimPrefix(output, "MCP Servers:\n")), func(t *testing.T) {
+			home := t.TempDir()
+			writePiInstallFixture(t, home)
+			mustWriteFile(t, filepath.Join(home, ".pi", "agent", "npm", "node_modules", "pi-mcp-adapter", "index.ts"), []byte("export default {}\n"))
+			installFakePiRuntime(t, output)
+
+			result, err := communitytool.ReconcilePiCodeGraph(communitytool.PiCodeGraphOptions{HomeDir: home, Selected: true})
+			if err == nil || errors.Is(err, communitytool.ErrPiCodeGraphAdapterHealthUnavailable) {
+				t.Fatalf("ReconcilePiCodeGraph() result=%#v error=%v, want concrete fatal runtime error", result, err)
+			}
+			if _, pendingErr := communitytool.PreservePiCodeGraphPending(result, err); pendingErr == nil {
+				t.Fatalf("PreservePiCodeGraphPending() error = nil, want explicit negative to remain fatal")
+			}
+		})
+	}
+}
+
+func TestPiCodeGraphRuntimeTreatsAmbiguousOutputAsPending(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake Pi runtime uses a POSIX script")
+	}
+	home := t.TempDir()
+	writePiInstallFixture(t, home)
+	mustWriteFile(t, filepath.Join(home, ".pi", "agent", "npm", "node_modules", "pi-mcp-adapter", "index.ts"), []byte("export default {}\n"))
+	installFakePiRuntime(t, `{"type":"session","version":3}`+"\n")
+
+	result, err := communitytool.ReconcilePiCodeGraph(communitytool.PiCodeGraphOptions{HomeDir: home, Selected: true})
+	if !errors.Is(err, communitytool.ErrPiCodeGraphAdapterHealthUnavailable) {
+		t.Fatalf("ReconcilePiCodeGraph() error = %v, want unavailable health evidence", err)
+	}
+	result, err = communitytool.PreservePiCodeGraphPending(result, err)
+	if err != nil || len(result.ManualActions) != 1 || !strings.Contains(result.ManualActions[0], "pending") {
+		t.Fatalf("pending result=%#v error=%v, want one manual action", result, err)
+	}
+}
+
 func TestSyncPlanAlwaysIncludesPiCodeGraphReconciliationAfterComponents(t *testing.T) {
 	home := t.TempDir()
 	runtime, err := newSyncRuntime(home, model.Selection{Agents: []model.AgentID{model.AgentPi}})
@@ -435,4 +597,15 @@ func writePiInstallFixture(t *testing.T, home string) {
 	t.Helper()
 	mustWriteFile(t, filepath.Join(home, ".pi", "agent", "settings.json"), []byte(`{}`))
 	mustWriteFile(t, filepath.Join(home, ".pi", "agent", "subagents", "worker.md"), []byte("---\ntools: bash\n---\nwork\n"))
+}
+
+func installFakePiRuntime(t *testing.T, output string) {
+	t.Helper()
+	binDir := t.TempDir()
+	piPath := filepath.Join(binDir, "pi")
+	quoted := strings.ReplaceAll(output, "'", "'\"'\"'")
+	if err := os.WriteFile(piPath, []byte("#!/bin/sh\nprintf '%s' '"+quoted+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }

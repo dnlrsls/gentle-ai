@@ -68,6 +68,9 @@ type SyncResult struct {
 	// processed during this sync. Paths appear once even when multiple
 	// components touch the same file. It is nil when no files changed.
 	ChangedFiles []string
+	// ManualActions reports non-fatal work that could not be verified or
+	// completed automatically.
+	ManualActions []string
 }
 
 // ParseSyncFlags parses the CLI arguments for the sync subcommand.
@@ -376,13 +379,14 @@ func DiscoverAgents(homeDir string) []model.AgentID {
 // It reuses backup/rollback infrastructure but only calls inject functions —
 // no agentInstallStep, no engram setup, no persona.
 type syncRuntime struct {
-	homeDir      string
-	workspaceDir string
-	selection    model.Selection
-	agentIDs     []model.AgentID
-	backupRoot   string
-	state        *runtimeState
-	changedFiles []string // accumulates absolute paths of files that actually changed
+	homeDir       string
+	workspaceDir  string
+	selection     model.Selection
+	agentIDs      []model.AgentID
+	backupRoot    string
+	state         *runtimeState
+	changedFiles  []string // accumulates absolute paths of files that actually changed
+	manualActions []string
 }
 
 func newSyncRuntime(homeDir string, selection model.Selection) (*syncRuntime, error) {
@@ -445,7 +449,7 @@ func (r *syncRuntime) stagePlan() pipeline.StagePlan {
 			changedFiles: &r.changedFiles,
 		})
 	}
-	apply = append(apply, piCodeGraphSyncStep{id: "sync:community-tool:pi-codegraph", homeDir: r.homeDir, workspaceDir: r.workspaceDir, changedFiles: &r.changedFiles})
+	apply = append(apply, piCodeGraphSyncStep{id: "sync:community-tool:pi-codegraph", homeDir: r.homeDir, workspaceDir: r.workspaceDir, changedFiles: &r.changedFiles, manualActions: &r.manualActions})
 
 	return pipeline.StagePlan{Prepare: prepare, Apply: apply}
 }
@@ -591,16 +595,23 @@ type codeGraphGuidanceSyncStep struct {
 type piCodeGraphSyncStep struct {
 	id, homeDir, workspaceDir string
 	changedFiles              *[]string
+	manualActions             *[]string
 }
+
+var refreshPiCodeGraphIfConfigured = communitytool.RefreshPiCodeGraphIfConfigured
 
 func (s piCodeGraphSyncStep) ID() string { return s.id }
 func (s piCodeGraphSyncStep) Run() error {
-	result, configured, err := communitytool.RefreshPiCodeGraphIfConfigured(s.homeDir, s.workspaceDir)
+	result, configured, err := refreshPiCodeGraphIfConfigured(s.homeDir, s.workspaceDir)
+	result, err = communitytool.PreservePiCodeGraphPending(result, err)
 	if err != nil {
 		return fmt.Errorf("sync Pi CodeGraph: %w", err)
 	}
 	if configured && result.Changed && s.changedFiles != nil {
 		*s.changedFiles = append(*s.changedFiles, result.Files...)
+	}
+	if s.manualActions != nil {
+		*s.manualActions = append(*s.manualActions, result.ManualActions...)
 	}
 	return nil
 }
@@ -926,12 +937,13 @@ func RunSyncWithSelection(homeDir string, selection model.Selection) (SyncResult
 	// (e.g. Engram and Context7 both merge into settings.json).
 	result.ChangedFiles = dedupPaths(rt.changedFiles)
 	result.FilesChanged = len(result.ChangedFiles)
+	result.ManualActions = append([]string(nil), rt.manualActions...)
 
 	// True no-op: agents were discovered but all managed assets were already
 	// current — no file was written or updated. Per spec scenario:
 	// "No managed assets to sync — system completes without modifying files
 	// and reports that no managed sync actions were needed."
-	if result.FilesChanged == 0 {
+	if result.FilesChanged == 0 && len(result.ManualActions) == 0 {
 		result.NoOp = true
 	}
 
@@ -1118,7 +1130,11 @@ func RenderSyncReport(result SyncResult) string {
 		return strings.TrimRight(b.String(), "\n")
 	}
 
-	fmt.Fprintln(&b, "gentle-ai sync — managed sync executed")
+	if result.FilesChanged == 0 && len(result.ManualActions) > 0 {
+		fmt.Fprintln(&b, "gentle-ai sync — manual actions required")
+	} else {
+		fmt.Fprintln(&b, "gentle-ai sync — managed sync executed")
+	}
 	fmt.Fprintf(&b, "Agents synced: %s\n", joinAgentIDs(result.Agents))
 
 	compParts := make([]string, 0, len(result.Selection.Components))
@@ -1137,6 +1153,14 @@ func RenderSyncReport(result SyncResult) string {
 	if len(result.ChangedFiles) > 0 {
 		for _, path := range result.ChangedFiles {
 			fmt.Fprintf(&b, "  - %s\n", path)
+		}
+	}
+
+	if len(result.ManualActions) > 0 {
+		fmt.Fprintln(&b, "")
+		fmt.Fprintln(&b, "Manual actions required:")
+		for _, action := range result.ManualActions {
+			fmt.Fprintf(&b, "  - %s\n", action)
 		}
 	}
 

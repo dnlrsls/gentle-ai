@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"github.com/gentleman-programming/gentle-ai/internal/agents"
 	"github.com/gentleman-programming/gentle-ai/internal/agents/codex"
 	"github.com/gentleman-programming/gentle-ai/internal/backup"
+	"github.com/gentleman-programming/gentle-ai/internal/components/communitytool"
 	"github.com/gentleman-programming/gentle-ai/internal/model"
 	"github.com/gentleman-programming/gentle-ai/internal/pipeline"
 	"github.com/gentleman-programming/gentle-ai/internal/state"
@@ -678,6 +680,57 @@ func TestCodeGraphGuidanceSyncStepRefreshesOldMarkerWhenConfigured(t *testing.T)
 	}
 	if !reflect.DeepEqual(changed, []string{agentsPath}) {
 		t.Fatalf("changed files = %#v, want %#v", changed, []string{agentsPath})
+	}
+}
+
+func TestPiCodeGraphSyncStepPreservesOnlyPendingAdapterHealth(t *testing.T) {
+	previous := refreshPiCodeGraphIfConfigured
+	t.Cleanup(func() { refreshPiCodeGraphIfConfigured = previous })
+
+	refreshPiCodeGraphIfConfigured = func(string, string) (communitytool.PiCodeGraphResult, bool, error) {
+		return communitytool.PiCodeGraphResult{}, true, communitytool.ErrPiCodeGraphAdapterHealthUnavailable
+	}
+	if err := (piCodeGraphSyncStep{}).Run(); err != nil {
+		t.Fatalf("piCodeGraphSyncStep.Run() pending error = %v", err)
+	}
+
+	wantErr := errors.New("Pi MCP config is malformed")
+	refreshPiCodeGraphIfConfigured = func(string, string) (communitytool.PiCodeGraphResult, bool, error) {
+		return communitytool.PiCodeGraphResult{}, true, wantErr
+	}
+	if err := (piCodeGraphSyncStep{}).Run(); !errors.Is(err, wantErr) {
+		t.Fatalf("piCodeGraphSyncStep.Run() error = %v, want %v", err, wantErr)
+	}
+
+	restoreErr := errors.New("restore Pi CodeGraph journal")
+	refreshPiCodeGraphIfConfigured = func(string, string) (communitytool.PiCodeGraphResult, bool, error) {
+		return communitytool.PiCodeGraphResult{}, true, errors.Join(communitytool.ErrPiCodeGraphAdapterHealthUnavailable, restoreErr)
+	}
+	if err := (piCodeGraphSyncStep{}).Run(); !errors.Is(err, restoreErr) {
+		t.Fatalf("piCodeGraphSyncStep.Run() joined error = %v, want fatal restore error", err)
+	}
+}
+
+func TestRunSyncWithSelectionReportsPendingPiCodeGraph(t *testing.T) {
+	previous := refreshPiCodeGraphIfConfigured
+	t.Cleanup(func() { refreshPiCodeGraphIfConfigured = previous })
+	refreshPiCodeGraphIfConfigured = func(string, string) (communitytool.PiCodeGraphResult, bool, error) {
+		return communitytool.PiCodeGraphResult{}, true, communitytool.ErrPiCodeGraphAdapterHealthUnavailable
+	}
+
+	result, err := RunSyncWithSelection(t.TempDir(), model.Selection{Agents: []model.AgentID{model.AgentPi}})
+	if err != nil {
+		t.Fatalf("RunSyncWithSelection() pending error = %v", err)
+	}
+	if result.NoOp || len(result.ManualActions) != 1 {
+		t.Fatalf("SyncResult = %#v, want non-no-op pending manual action", result)
+	}
+	report := RenderSyncReport(result)
+	if !strings.Contains(report, "Manual actions required") || !strings.Contains(report, "Pi CodeGraph integration is pending") {
+		t.Fatalf("RenderSyncReport() missing pending action:\n%s", report)
+	}
+	if strings.Contains(report, "All managed assets are already up to date") {
+		t.Fatalf("RenderSyncReport() reported misleading clean no-op:\n%s", report)
 	}
 }
 
