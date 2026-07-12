@@ -79,11 +79,11 @@ func BuildNativeGateRequest(ctx context.Context, repo string, input NativeGateRe
 		}
 		request.Target = Target{Kind: TargetCurrentChanges, IntendedUntracked: intended}
 	case GatePrePush:
-		head, err := resolveCommit(ctx, repo, "HEAD")
+		target, push, err := buildPushTarget(ctx, repo, input.BaseRef)
 		if err != nil {
 			return GateRequest{}, err
 		}
-		request.Target = Target{Kind: TargetExactRevision, Revision: head}
+		request.Target, request.Push = target, push
 	case GatePrePR:
 		target, prePR, err := buildPrePRTarget(ctx, repo, input.BaseRef, input.PrePRCIAttestation, nil)
 		if err != nil {
