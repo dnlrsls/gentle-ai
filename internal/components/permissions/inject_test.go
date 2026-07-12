@@ -3,7 +3,9 @@ package permissions
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -467,6 +469,104 @@ func TestInjectCodexPermissionsSkipsNixStoreOnWindows(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("Windows Codex config missing non-fatal Nix home path %q; got:\n%s", want, text)
 		}
+	}
+}
+
+func TestInjectCodexPermissionsIncludesExistingLinuxbrewPrefix(t *testing.T) {
+	home := t.TempDir()
+	prefix := filepath.Join(t.TempDir(), "linuxbrew")
+	binDir := filepath.Join(prefix, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("create Linuxbrew bin directory: %v", err)
+	}
+	brewPath := filepath.Join(binDir, "brew")
+	if err := os.WriteFile(brewPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("create brew executable: %v", err)
+	}
+
+	origGOOS := codexPermissionsGOOS
+	origLookPath := codexPermissionsLookPath
+	codexPermissionsGOOS = "linux"
+	codexPermissionsLookPath = func(string) (string, error) { return brewPath, nil }
+	t.Cleanup(func() {
+		codexPermissionsGOOS = origGOOS
+		codexPermissionsLookPath = origLookPath
+	})
+
+	if _, err := Inject(home, codexAdapter()); err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	content, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	if !strings.Contains(string(content), strconv.Quote(prefix)+` = "read"`) {
+		t.Fatalf("Codex config missing Linuxbrew prefix %q; got:\n%s", prefix, content)
+	}
+}
+
+func TestInjectCodexPermissionsSkipsLinuxbrewPrefix(t *testing.T) {
+	tests := []struct {
+		name     string
+		goos     string
+		brewPath func(t *testing.T) string
+	}{
+		{
+			name: "brew is absent on Linux",
+			goos: "linux",
+		},
+		{
+			name: "detected prefix does not exist",
+			goos: "linux",
+			brewPath: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "missing", "bin", "brew")
+			},
+		},
+		{
+			name: "macOS remains unchanged",
+			goos: "darwin",
+			brewPath: func(t *testing.T) string {
+				prefix := t.TempDir()
+				return filepath.Join(prefix, "bin", "brew")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			brewPath := ""
+			if tt.brewPath != nil {
+				brewPath = tt.brewPath(t)
+			}
+			origGOOS := codexPermissionsGOOS
+			origLookPath := codexPermissionsLookPath
+			codexPermissionsGOOS = tt.goos
+			codexPermissionsLookPath = func(string) (string, error) {
+				if brewPath == "" {
+					return "", exec.ErrNotFound
+				}
+				return brewPath, nil
+			}
+			t.Cleanup(func() {
+				codexPermissionsGOOS = origGOOS
+				codexPermissionsLookPath = origLookPath
+			})
+
+			if _, err := Inject(home, codexAdapter()); err != nil {
+				t.Fatalf("Inject() error = %v", err)
+			}
+			content, err := os.ReadFile(filepath.Join(home, ".codex", "config.toml"))
+			if err != nil {
+				t.Fatalf("read config.toml: %v", err)
+			}
+			if brewPath != "" {
+				prefix := filepath.Dir(filepath.Dir(brewPath))
+				if strings.Contains(string(content), strconv.Quote(prefix)+` = "read"`) {
+					t.Fatalf("Codex config unexpectedly includes Linuxbrew prefix %q; got:\n%s", prefix, content)
+				}
+			}
+		})
 	}
 }
 

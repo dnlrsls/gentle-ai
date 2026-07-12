@@ -3,6 +3,8 @@ package permissions
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -13,6 +15,7 @@ import (
 )
 
 var codexPermissionsGOOS = runtime.GOOS
+var codexPermissionsLookPath = exec.LookPath
 
 type InjectionResult struct {
 	Changed bool
@@ -224,6 +227,9 @@ func injectCodexPermissions(homeDir string, adapter agents.Adapter) (InjectionRe
 	if codexPermissionsGOOS != "windows" {
 		readPaths = append(readPaths, `"/nix/store"`)
 	}
+	if prefix, ok := existingLinuxbrewPrefix(); ok {
+		readPaths = append(readPaths, strconv.Quote(prefix))
+	}
 	for _, path := range readPaths {
 		merged = filemerge.UpsertTOMLTableKey(merged, "permissions.gentle-dev.filesystem", path, `"read"`)
 	}
@@ -250,6 +256,24 @@ func injectCodexPermissions(homeDir string, adapter agents.Adapter) (InjectionRe
 	}
 
 	return InjectionResult{Changed: writeResult.Changed, Files: []string{configPath}}, nil
+}
+
+func existingLinuxbrewPrefix() (string, bool) {
+	if codexPermissionsGOOS != "linux" {
+		return "", false
+	}
+
+	brewPath, err := codexPermissionsLookPath("brew")
+	if err != nil || !filepath.IsAbs(brewPath) || filepath.Base(brewPath) != "brew" || filepath.Base(filepath.Dir(brewPath)) != "bin" {
+		return "", false
+	}
+
+	prefix := filepath.Dir(filepath.Dir(brewPath))
+	info, err := os.Stat(prefix)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return prefix, true
 }
 
 func removeCodexHomeWorkspaceRoot(content string) string {
