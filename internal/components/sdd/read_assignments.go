@@ -78,24 +78,8 @@ func ReadCurrentModelAssignments(settingsPath string) (map[string]model.ModelAss
 		if !ok || modelStr == "" {
 			continue
 		}
-		// Find the first separator (either '/' or ':') to correctly parse
-		// model specs like "openrouter/qwen/qwen3.6-plus:free" where the
-		// provider is before the first slash, not before the colon.
-		// Issue #802: colon-first parsing broke OpenRouter free-model specs.
-		sep := -1
-		for i, c := range modelStr {
-			if c == '/' || c == ':' {
-				sep = i
-				break
-			}
-		}
-		if sep <= 0 {
-			// No separator or separator is the first character — skip malformed value.
-			continue
-		}
-		providerID := modelStr[:sep]
-		modelID := modelStr[sep+1:]
-		if modelID == "" {
+		providerID, modelID, ok := model.SplitModelSpec(modelStr)
+		if !ok {
 			continue
 		}
 		assignmentKey := name

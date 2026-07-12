@@ -238,21 +238,8 @@ func extractModelFromAgent(agentMap map[string]any) model.ModelAssignment {
 		return model.ModelAssignment{}
 	}
 
-	// Find the first separator (either "/" or ":") to split provider from model.
-	// This handles specs like "openrouter/qwen/qwen3.6-plus:free" correctly.
-	idx := -1
-	for i := 0; i < len(modelStr); i++ {
-		if modelStr[i] == '/' || modelStr[i] == ':' {
-			idx = i
-			break
-		}
-	}
-	if idx <= 0 {
-		return model.ModelAssignment{}
-	}
-	providerID := modelStr[:idx]
-	modelID := modelStr[idx+1:]
-	if modelID == "" {
+	providerID, modelID, ok := model.SplitModelSpec(modelStr)
+	if !ok {
 		return model.ModelAssignment{}
 	}
 	effort, _ := agentMap["variant"].(string)
