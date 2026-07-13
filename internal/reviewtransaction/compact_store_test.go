@@ -206,6 +206,83 @@ func TestCompactStoreRecoverRejectsIneligibleOrUnprovenPredecessor(t *testing.T)
 	}
 }
 
+func TestStartCompactAuthorityBlocksSupersededApprovedPredecessor(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	predecessor, store, _ := approvedCompactRevisionFixture(t, repo, "compact-start-a")
+	record, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSnapshotFile(t, repo, "tracked.txt", "successor\n")
+	successor := newCompactTestState(t, repo, "compact-start-b")
+	successor.Generation = predecessor.Generation + 1
+	if _, err := RecoverCompactAuthority(context.Background(), repo, CompactRecoveryRequest{
+		PredecessorLineageID: predecessor.LineageID, ExpectedPredecessorRevision: record.Revision,
+		Successor: successor, Disposition: RecoveryScopeChanged, Reason: "scope changed", Actor: "maintainer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := StartCompactAuthority(context.Background(), repo, CompactStartRequest{State: newCompactRevisionState(t, repo, "compact-start-c")})
+	if err != nil || result.Action != CompactStartBlocked || result.Record.State.LineageID != successor.LineageID {
+		t.Fatalf("start against superseded predecessor = %#v, %v", result, err)
+	}
+}
+
+func TestStartCompactAuthorityConcurrentlyConvergesOnOneEquivalentAuthority(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	writeSnapshotFile(t, repo, "tracked.txt", "candidate\n")
+	first := newCompactTestState(t, repo, "compact-start-first")
+	second := first
+	second.LineageID = "compact-start-second"
+
+	type outcome struct {
+		result CompactStartResult
+		err    error
+	}
+	results := make(chan outcome, 2)
+	for _, state := range []CompactState{first, second} {
+		go func(state CompactState) {
+			result, err := StartCompactAuthority(context.Background(), repo, CompactStartRequest{State: state})
+			results <- outcome{result: result, err: err}
+		}(state)
+	}
+	one, two := <-results, <-results
+	if one.err != nil || two.err != nil {
+		t.Fatalf("concurrent starts = %#v, %#v", one, two)
+	}
+	if one.result.Record.State.LineageID != two.result.Record.State.LineageID || one.result.Record.Revision != two.result.Record.Revision {
+		t.Fatalf("concurrent starts diverged: %#v, %#v", one.result, two.result)
+	}
+	actions := map[CompactStartAction]int{one.result.Action: 1, two.result.Action: 1}
+	if actions[CompactStartCreated] != 1 || actions[CompactStartResumed] != 1 {
+		t.Fatalf("concurrent start actions = %#v", actions)
+	}
+	leaves, err := CompactAuthorityLeaves(context.Background(), repo)
+	if err != nil || len(leaves) != 1 {
+		t.Fatalf("concurrent start leaves = %#v, %v", leaves, err)
+	}
+}
+
+func TestStartCompactAuthorityBlocksChangedTargetForExplicitRecovery(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	writeSnapshotFile(t, repo, "tracked.txt", "first candidate\n")
+	first := newCompactTestState(t, repo, "compact-start-original")
+	created, err := StartCompactAuthority(context.Background(), repo, CompactStartRequest{State: first})
+	if err != nil || created.Action != CompactStartCreated {
+		t.Fatalf("create original authority = %#v, %v", created, err)
+	}
+	writeSnapshotFile(t, repo, "tracked.txt", "changed candidate\n")
+	changed := newCompactTestState(t, repo, "compact-start-changed")
+	blocked, err := StartCompactAuthority(context.Background(), repo, CompactStartRequest{State: changed})
+	if err != nil || blocked.Action != CompactStartBlocked || blocked.Record.Revision != created.Record.Revision {
+		t.Fatalf("changed target start = %#v, %v", blocked, err)
+	}
+	leaves, err := CompactAuthorityLeaves(context.Background(), repo)
+	if err != nil || len(leaves) != 1 || leaves[0].lineageID != first.LineageID {
+		t.Fatalf("changed target created a new authority: %#v, %v", leaves, err)
+	}
+}
+
 func TestCompactStoreReplacesCurrentStateWithCASAndExactRetry(t *testing.T) {
 	repo := initSnapshotRepo(t)
 	writeSnapshotFile(t, repo, "tracked.txt", "candidate\n")

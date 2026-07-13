@@ -343,6 +343,20 @@ func (builder SnapshotBuilder) DiscoverIntendedUntracked(ctx context.Context) ([
 	return canonicalPaths(paths)
 }
 
+// HasDirtyTrackedChanges reports whether the worktree or index differs from
+// HEAD, excluding untracked paths.
+func (builder SnapshotBuilder) HasDirtyTrackedChanges(ctx context.Context) (bool, error) {
+	root, err := builder.ResolveRepositoryRoot(ctx)
+	if err != nil {
+		return false, err
+	}
+	output, err := runGit(ctx, root, nil, nil, "diff", "--name-only", "-z", "HEAD", "--")
+	if err != nil {
+		return false, err
+	}
+	return len(output) != 0, nil
+}
+
 func canonicalRepositoryPath(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {

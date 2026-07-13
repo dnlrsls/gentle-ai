@@ -24,6 +24,8 @@ Only candidate-caused BLOCKER or CRITICAL findings may require correction. Pre-e
 
 type ReviewFacadeStartResult struct {
 	Operation        string                      `json:"operation"`
+	Action           string                      `json:"action"`
+	LensesRequired   bool                        `json:"lenses_required"`
 	LineageID        string                      `json:"lineage_id"`
 	State            reviewtransaction.State     `json:"state"`
 	RiskLevel        reviewtransaction.RiskLevel `json:"risk_level"`
@@ -298,6 +300,7 @@ func RunReviewFacadeStart(args []string, stdout io.Writer) error {
 	policySource := flags.String("policy", "", "optional review policy file; the native bounded policy is used by default")
 	focus := flags.String("focus", "reliability", "dominant standard-risk focus: risk, resilience, readability, or reliability")
 	baseRef := flags.String("base-ref", "", "optional base revision for reviewing committed HEAD changes")
+	committedOnly := flags.Bool("committed-only", false, "acknowledge that --base-ref excludes dirty tracked changes")
 	tracePath := flags.String("trace", "", "optional diagnostic operation metadata trace path")
 	if err := parseReviewFlags(flags, args); err != nil {
 		return err
@@ -312,6 +315,15 @@ func RunReviewFacadeStart(args []string, stdout io.Writer) error {
 	root, err := builder.ResolveRepositoryRoot(context.Background())
 	if err != nil {
 		return fmt.Errorf("resolve review repository root: %w", err)
+	}
+	if strings.TrimSpace(*baseRef) != "" {
+		dirtyTracked, dirtyErr := (reviewtransaction.SnapshotBuilder{Repo: root}).HasDirtyTrackedChanges(context.Background())
+		if dirtyErr != nil {
+			return fmt.Errorf("detect dirty tracked changes for committed review: %w", dirtyErr)
+		}
+		if dirtyTracked && !*committedOnly {
+			return errors.New("review start with --base-ref omits dirty tracked changes; rerun with --committed-only to acknowledge committed-only review scope")
+		}
 	}
 	intended, err := builder.DiscoverIntendedUntracked(context.Background())
 	if err != nil {
@@ -337,16 +349,6 @@ func RunReviewFacadeStart(args []string, stdout io.Writer) error {
 	if strings.TrimSpace(*lineage) == "" {
 		*lineage = "review-" + strings.TrimPrefix(snapshot.Identity, "sha256:")[:16]
 	}
-	store, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), root, *lineage)
-	if err != nil {
-		return fmt.Errorf("derive facade review store: %w", err)
-	}
-	store.TracePath = strings.TrimSpace(*tracePath)
-	if existing, loadErr := store.Load(); loadErr == nil {
-		return fmt.Errorf("review lineage %q already exists at revision %s; use gentle-ai review recover with an explicit predecessor and distinct successor lineage", *lineage, existing.Revision)
-	} else if !os.IsNotExist(loadErr) {
-		return fmt.Errorf("load existing compact review lineage: %w", loadErr)
-	}
 	legacy, err := reviewtransaction.AuthoritativeStore(context.Background(), root, *lineage)
 	if err == nil {
 		if _, loadErr := legacy.LoadChain(); loadErr == nil {
@@ -365,13 +367,18 @@ func RunReviewFacadeStart(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("create compact facade review: %w", err)
 	}
-	if _, err := store.Replace("", "review/start", state); err != nil {
-		return fmt.Errorf("persist compact facade review: %w", err)
+	started, err := reviewtransaction.StartCompactAuthority(context.Background(), root, reviewtransaction.CompactStartRequest{
+		State: state, TracePath: strings.TrimSpace(*tracePath),
+	})
+	if err != nil {
+		return fmt.Errorf("start compact facade review: %w", err)
 	}
+	authority := started.Record.State
 	return encodeReviewJSON(stdout, ReviewFacadeStartResult{
-		Operation: "review/start", LineageID: state.LineageID, State: state.State,
-		RiskLevel: state.RiskLevel, SelectedLenses: state.SelectedLenses,
-		ChangedFiles: len(state.InitialSnapshot.Paths), ChangedLines: changedLines, CorrectionBudget: state.CorrectionBudget,
+		Operation: "review/start", Action: string(started.Action), LensesRequired: started.LensesRequired,
+		LineageID: authority.LineageID, State: authority.State, RiskLevel: authority.RiskLevel,
+		SelectedLenses: authority.SelectedLenses, ChangedFiles: len(authority.InitialSnapshot.Paths),
+		ChangedLines: authority.OriginalChangedLines, CorrectionBudget: authority.CorrectionBudget,
 	})
 }
 
