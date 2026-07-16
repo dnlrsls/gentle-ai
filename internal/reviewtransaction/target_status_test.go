@@ -1,6 +1,7 @@
 package reviewtransaction
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -34,7 +35,18 @@ func TestAssessTargetStatusDerivesReceiptTruthWithoutMutation(t *testing.T) {
 		{
 			name: "approved derived receipt is published",
 			prepare: func(t *testing.T, repo, lineage string) CompactStore {
+				gitSnapshot(t, repo, "mv", "tracked.txt", "tracked.md")
+				gitSnapshot(t, repo, "commit", "-am", "low-risk base")
+				writeSnapshotFile(t, repo, "tracked.md", "next candidate\n")
 				_, store, _ := approvedCompactCurrentChangesFixture(t, repo, lineage, []string{})
+				payload, err := os.ReadFile(store.ReceiptPath())
+				if err != nil {
+					t.Fatal(err)
+				}
+				payload = bytes.Replace(payload, []byte(`"selected_lenses": []`), []byte(`"selected_lenses": null`), 1)
+				if err := os.WriteFile(store.ReceiptPath(), payload, 0o644); err != nil {
+					t.Fatal(err)
+				}
 				return store
 			},
 			wantApplicability: TargetApplicabilityCurrent,
@@ -234,6 +246,26 @@ func TestAssessTargetStatusRecognizesAuthorizedCorrection(t *testing.T) {
 	got, err := AssessTargetStatus(context.Background(), repo, TargetStatusRequest{Target: Target{Kind: TargetCurrentChanges, IntendedUntracked: []string{}}, LineageID: state.LineageID})
 	if err != nil || got.Applicability != TargetApplicabilityCurrent || got.State != StateCorrectionRequired || got.Action != TargetStatusActionFinalize {
 		t.Fatalf("authorized correction status = %#v, err = %v", got, err)
+	}
+}
+
+func TestCorrectionScopeExpansionGuidesStatusAndStartToRecovery(t *testing.T) {
+	repo, predecessor, _, _ := correctionScopeRecoveryFixture(t, "review-correction-expansion")
+	writeSnapshotFile(t, repo, "process_helper.go", "package processhelper\n")
+	target := Target{Kind: TargetCurrentChanges, IntendedUntracked: []string{"process_helper.go"}}
+	status, err := AssessTargetStatus(context.Background(), repo, TargetStatusRequest{Target: target, LineageID: predecessor.LineageID})
+	if err != nil || status.Applicability != TargetApplicabilityCurrent || status.State != StateCorrectionRequired ||
+		status.Action != TargetStatusActionRecover || status.Replayability != ReplayabilityManualActionRequired {
+		t.Fatalf("expanded correction status = %#v, %v", status, err)
+	}
+	requested := newCompactStartStateForTarget(t, repo, "review-correction-expansion-new", target)
+	started, err := StartCompactAuthority(context.Background(), repo, CompactStartRequest{State: requested})
+	if err != nil || started.Action != CompactStartAction("recover") || started.Record.State.LineageID != predecessor.LineageID {
+		t.Fatalf("expanded correction start = %#v, %v", started, err)
+	}
+	requestedStore, _ := CompactAuthoritativeStore(context.Background(), repo, requested.LineageID)
+	if _, err := os.Stat(requestedStore.StatePath()); !os.IsNotExist(err) {
+		t.Fatalf("start published an unauthorized successor: %v", err)
 	}
 }
 

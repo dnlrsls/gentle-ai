@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -168,6 +169,52 @@ func TestNegotiatedReviewBindSDDPreservesLegacyResultAndBindingHashes(t *testing
 	assertNoPrivateReviewOperationFields(t, negotiatedOutput.Bytes())
 }
 
+func TestNegotiatedReviewBindSDDAcceptsSemanticallyEquivalentCompactReceiptArrays(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	writeNegotiatedOperationChange(t, repo, "thin")
+	runReviewCLIGit(t, repo, "add", "-A")
+	runReviewCLIGit(t, repo, "commit", "-qm", "OpenSpec binding baseline")
+	started, store := approveDiscoveryMarkdown(t, repo, "review-binding-arrays", "docs/reviewed.md", "reviewed\n")
+	record, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := readReviewOperationFile(t, store.StatePath())
+	receipt := readReviewOperationFile(t, store.ReceiptPath())
+	receipt = bytes.Replace(receipt, []byte(`"selected_lenses": []`), []byte(`"selected_lenses": null`), 1)
+	receipt = bytes.Replace(receipt, []byte(`"resolved_finding_ids": null`), []byte(`"resolved_finding_ids": []`), 1)
+	if err := os.WriteFile(store.ReceiptPath(), receipt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := RunReview([]string{
+		"bind-sdd", "--contract", ReviewIntegrationContractV1, "--cwd", repo, "--change", "thin",
+		"--lineage", started.LineageID, "--expected-binding-revision=",
+	}, &output); err != nil {
+		t.Fatalf("semantically equivalent compact receipt arrays: %v\n%s", err, output.String())
+	}
+	var binding sddstatus.ReviewBinding
+	decodeStrictReviewJSON(t, decodeReviewOperationEnvelope(t, output.Bytes()).Result, &binding)
+	canonical, err := json.Marshal(binding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readReviewOperationFile(t, reviewOperationBindingPath(store, "thin")); !bytes.Equal(got, append(canonical, '\n')) {
+		t.Fatal("BIND-SDD did not publish canonical binding bytes")
+	}
+	receiptHash, err := reviewtransaction.HashArtifact(store.ReceiptPath())
+	if after, loadErr := store.Load(); err != nil || loadErr != nil || after.Revision != record.Revision || binding.AuthorityRevision != record.Revision || binding.ReceiptHash != receiptHash {
+		t.Fatalf("binding identities changed: binding=%#v receipt_err=%v load_err=%v", binding, err, loadErr)
+	}
+	if got := readReviewOperationFile(t, store.StatePath()); !bytes.Equal(got, authority) {
+		t.Fatal("BIND-SDD rewrote compact authority bytes")
+	}
+	if got := readReviewOperationFile(t, store.ReceiptPath()); !bytes.Equal(got, receipt) {
+		t.Fatal("BIND-SDD rewrote compact receipt bytes")
+	}
+}
+
 func TestNegotiatedReviewBindSDDRejectsHistoricalLegacyThroughTypedFailureEnvelope(t *testing.T) {
 	fixture := newLegacyCLIFixture(t, "historical-bind-sdd")
 	writeNegotiatedOperationChange(t, fixture.repo, "thin")
@@ -299,7 +346,16 @@ func finalizeNegotiatedOperationFixture(t *testing.T, repo, lineage string, nego
 	if err := os.WriteFile(evidence, []byte("focused tests pass\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"--cwd", repo, "--lineage", started.LineageID, "--evidence", evidence}
+	args := []string{"--cwd", repo, "--lineage", started.LineageID}
+	for index, lens := range started.SelectedLenses {
+		result := filepath.Join(t.TempDir(), fmt.Sprintf("reviewer-%d.json", index))
+		payload := fmt.Sprintf(`{"lens":%q,"findings":[],"evidence":["reviewed exact candidate tree"]}`, lens)
+		if err := os.WriteFile(result, []byte(payload), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		args = append(args, "--result", result)
+	}
+	args = append(args, "--evidence", evidence)
 	if negotiated {
 		args = append([]string{"--contract", ReviewIntegrationContractV1}, args...)
 	}

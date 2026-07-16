@@ -84,13 +84,14 @@ type TargetStatusResult struct {
 }
 
 type targetStatusCandidate struct {
-	version           AuthorityVersion
-	lineage           string
-	compact           *CompactRecord
-	legacy            *ValidatedChain
-	receiptIdentity   string
-	receiptPublished  bool
-	receiptReplayable bool
+	version            AuthorityVersion
+	lineage            string
+	compact            *CompactRecord
+	legacy             *ValidatedChain
+	receiptIdentity    string
+	receiptPublished   bool
+	receiptReplayable  bool
+	correctionRecovery bool
 }
 
 // AssessTargetStatus classifies the selected live Git projection against
@@ -168,18 +169,44 @@ func AssessTargetStatus(ctx context.Context, repo string, request TargetStatusRe
 	}
 
 	candidates := []targetStatusCandidate{}
+	scopeChangedCandidates := []targetStatusCandidate{}
+	unassessableScopeCandidates := []targetStatusCandidate{}
 	for lineage, candidate := range compact {
 		if request.LineageID != "" && request.LineageID != lineage {
 			continue
 		}
-		matches := compactLiveTargetMatchesSnapshot(ctx, repo, candidate.compact.State, live, true)
-		if candidate.compact.State.State == StateCorrectionRequired {
+		state := candidate.compact.State
+		if state.State == StateCorrectionRequired {
 			requested := candidate.compact.State
 			requested.InitialSnapshot = live
-			matches = compactStartCorrectionResume(ctx, repo, candidate.compact.State, requested)
-		}
-		if matches {
+			switch classifyCompactCorrectionTarget(ctx, repo, state, requested) {
+			case compactCorrectionTargetResume, compactCorrectionTargetBlocked:
+				candidates = append(candidates, candidate)
+				continue
+			case compactCorrectionTargetRecover:
+				candidate.correctionRecovery = true
+				candidates = append(candidates, candidate)
+				continue
+			}
+		} else if compactLiveTargetMatchesSnapshot(ctx, repo, state, live, true) {
 			candidates = append(candidates, candidate)
+			continue
+		}
+		if request.LineageID == "" && candidate.receiptPublished && (state.State == StateApproved || state.State == StateEscalated) {
+			gate := GatePostApply
+			if live.Projection == ProjectionStaged {
+				gate = GatePreCommit
+			}
+			assessment, assessErr := AssessCompactGateTarget(ctx, repo, state, NativeGateRequestInput{
+				Gate: gate, LineageID: state.LineageID, IntendedUntracked: append([]string{}, state.CurrentSnapshot.IntendedUntracked...),
+			})
+			if assessErr != nil {
+				unassessableScopeCandidates = append(unassessableScopeCandidates, candidate)
+				continue
+			}
+			if assessment.Applicability == CompactGateTargetScopeChanged {
+				scopeChangedCandidates = append(scopeChangedCandidates, candidate)
+			}
 		}
 	}
 	for lineage, chain := range legacy {
@@ -208,6 +235,25 @@ func AssessTargetStatus(ctx context.Context, repo string, request TargetStatusRe
 		}
 		return candidates[i].version < candidates[j].version
 	})
+	sort.Slice(scopeChangedCandidates, func(i, j int) bool {
+		return scopeChangedCandidates[i].lineage < scopeChangedCandidates[j].lineage
+	})
+	if len(candidates) == 0 && len(scopeChangedCandidates) > 0 && len(scopeChangedCandidates)+len(unassessableScopeCandidates) > 1 {
+		scopeChangedCandidates = append(scopeChangedCandidates, unassessableScopeCandidates...)
+		sort.Slice(scopeChangedCandidates, func(i, j int) bool {
+			return scopeChangedCandidates[i].lineage < scopeChangedCandidates[j].lineage
+		})
+		base.Applicability = TargetApplicabilityAmbiguous
+		base.Action = TargetStatusActionSelectLineage
+		base.Replayability = ReplayabilityStatusRequired
+		for _, candidate := range scopeChangedCandidates {
+			base.CandidateLineageIDs = append(base.CandidateLineageIDs, candidate.lineage)
+		}
+		return base, nil
+	}
+	if len(candidates) == 0 && len(unassessableScopeCandidates) > 0 {
+		return corruptedTargetStatus(base), nil
+	}
 
 	switch len(candidates) {
 	case 0:
@@ -246,6 +292,10 @@ func targetStatusForCandidate(result TargetStatusResult, candidate targetStatusC
 		result.OriginalChangedLines, result.Tier, result.CorrectionBudget = state.OriginalChangedLines, state.RiskLevel, state.CorrectionBudget
 		result.Projection = targetProjectionFromCompact(state, result.Projection)
 		result.ReceiptIdentity = candidate.receiptIdentity
+		if candidate.correctionRecovery {
+			result.Action, result.Replayability = TargetStatusActionRecover, ReplayabilityManualActionRequired
+			return result
+		}
 		if !candidate.receiptPublished && candidate.receiptReplayable {
 			result.Action, result.Replayability = TargetStatusActionFinalize, ReplayabilityExactReplaySafe
 			return result
@@ -320,13 +370,8 @@ func inspectCompactTargetReceipt(store CompactStore, state CompactState) (identi
 	if parseErr != nil {
 		return "", false, false, fmt.Errorf("parse compact target receipt: %w", parseErr)
 	}
-	canonical, marshalErr := json.MarshalIndent(expected, "", "  ")
-	if marshalErr != nil {
-		return "", false, false, fmt.Errorf("canonicalize compact target receipt: %w", marshalErr)
-	}
-	canonical = append(canonical, '\n')
-	if !reflect.DeepEqual(existing, expected) || !bytes.Equal(payload, canonical) {
-		return "", false, false, errors.New("compact target receipt does not equal the canonical derived receipt")
+	if !CompactReceiptEqual(existing, expected) {
+		return "", false, false, errors.New("compact target receipt does not equal the derived receipt")
 	}
 	sum := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(sum[:]), true, false, nil

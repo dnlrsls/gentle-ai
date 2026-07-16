@@ -6,14 +6,111 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 )
 
 var finalCompactGateAllowHook = func() {}
 
+type CompactGateTargetApplicability string
+
+const (
+	CompactGateTargetExact        CompactGateTargetApplicability = "exact"
+	CompactGateTargetScopeChanged CompactGateTargetApplicability = "scope-changed"
+	CompactGateTargetUnrelated    CompactGateTargetApplicability = "unrelated"
+)
+
+type CompactGateTargetAssessment struct {
+	Applicability CompactGateTargetApplicability
+	Expected      Snapshot
+	Actual        Snapshot
+}
+
+// AssessCompactGateTarget derives only gate-target applicability. It does not
+// authorize a gate, read external evidence, acquire the writer lock, or mutate
+// authority. Delivery still requires EvaluateCompactGate after one exact
+// receipt has been selected.
+func AssessCompactGateTarget(ctx context.Context, repo string, state CompactState, input NativeGateRequestInput) (CompactGateTargetAssessment, error) {
+	assessment := CompactGateTargetAssessment{Expected: state.CurrentSnapshot}
+	if err := state.Validate(); err != nil {
+		return assessment, fmt.Errorf("validate compact gate target authority: %w", err)
+	}
+	if strings.TrimSpace(input.LineageID) != "" && input.LineageID != state.LineageID {
+		assessment.Applicability = CompactGateTargetUnrelated
+		return assessment, nil
+	}
+	input.LineageID = state.LineageID
+	if input.IntendedUntracked == nil {
+		input.IntendedUntracked = append([]string{}, state.CurrentSnapshot.IntendedUntracked...)
+	}
+	request, err := buildCompactGateRequest(ctx, repo, state, input)
+	if err != nil && input.Gate == GateRelease {
+		head, headErr := resolveCommit(ctx, repo, "HEAD")
+		if headErr == nil {
+			request = GateRequest{
+				Schema:  GateRequestSchema,
+				Gate:    GateRelease,
+				Target:  Target{Kind: TargetExactRevision, Revision: head},
+				Release: &ReleaseRequest{Revision: head},
+			}
+			err = nil
+		}
+	}
+	if err != nil {
+		return assessment, fmt.Errorf("derive compact gate target: %w", err)
+	}
+	if err := validateCompactUntrackedScope(ctx, repo, state, request); err != nil {
+		assessment.Applicability = CompactGateTargetScopeChanged
+		return assessment, nil
+	}
+	snapshot, _, err := buildCompactLifecycleSnapshot(ctx, repo, request)
+	if err != nil {
+		return assessment, fmt.Errorf("build compact gate target: %w", err)
+	}
+	assessment.Actual = snapshot
+	strictBinding := request.Gate == GatePostApply || request.Gate == GatePreCommit ||
+		request.Gate == GatePrePush && state.InitialSnapshot.Kind != TargetCurrentChanges
+	pathsMatch := pathsAreSubset(snapshot.Paths, state.GenesisPaths) == nil
+	baseMatches := snapshot.BaseTree == state.CurrentSnapshot.BaseTree || request.Target.Kind == TargetFixDiff
+	if strictBinding {
+		pathsMatch = snapshot.PathsDigest == state.CurrentSnapshot.PathsDigest
+		baseMatches = snapshot.BaseTree == state.CurrentSnapshot.BaseTree
+	}
+	if request.Gate == GatePrePR {
+		// A base advance is authorized only by the later evidence-bearing gate
+		// evaluation, but it still names this receipt when candidate and paths
+		// remain exact.
+		baseMatches = true
+	}
+	if snapshot.CandidateTree == state.CurrentSnapshot.CandidateTree && pathsMatch && baseMatches {
+		assessment.Applicability = CompactGateTargetExact
+		return assessment, nil
+	}
+	if snapshot.BaseTree == state.CurrentSnapshot.BaseTree || snapshot.PathsDigest == state.CurrentSnapshot.PathsDigest ||
+		hasAnyReviewPath(snapshot.Paths, state.GenesisPaths) {
+		assessment.Applicability = CompactGateTargetScopeChanged
+		return assessment, nil
+	}
+	assessment.Applicability = CompactGateTargetUnrelated
+	return assessment, nil
+}
+
+func hasAnyReviewPath(left, right []string) bool {
+	paths := make(map[string]struct{}, len(left))
+	for _, logicalPath := range left {
+		paths[logicalPath] = struct{}{}
+	}
+	for _, logicalPath := range right {
+		if _, ok := paths[logicalPath]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceipt, input NativeGateRequestInput) NativeGateEvaluation {
-	invalid := func(reason string) NativeGateEvaluation {
-		return NativeGateEvaluation{Result: GateInvalidated, Reason: reason}
+	invalid := func(reason string, cause ...error) NativeGateEvaluation {
+		return NativeGateEvaluation{Result: GateInvalidated, Reason: reason, Cause: errors.Join(cause...)}
 	}
 	if err := receipt.Validate(); err != nil {
 		return invalid("compact review receipt is invalid: " + err.Error())
@@ -59,9 +156,9 @@ func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceip
 	if err != nil {
 		if input.Gate == GatePrePR {
 			denialContext.Denial = &GateDenial{Stage: "boundary-selection", Code: "unavailable"}
-			return NativeGateEvaluation{Result: GateInvalidated, Reason: "compact gate inputs cannot be derived: " + err.Error(), Context: denialContext}
+			return NativeGateEvaluation{Result: GateInvalidated, Reason: "compact gate inputs cannot be derived: " + err.Error(), Context: denialContext, Cause: err}
 		}
-		return invalid("compact gate inputs cannot be derived: " + err.Error())
+		return invalid("compact gate inputs cannot be derived: "+err.Error(), err)
 	}
 	if (request.Gate == GatePostApply || request.Gate == GatePreCommit) && !equalStrings(request.Target.IntendedUntracked, record.State.CurrentSnapshot.IntendedUntracked) {
 		return invalid("current repository target does not retain the authoritative intended-untracked paths")
@@ -78,7 +175,7 @@ func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceip
 	}
 	snapshot, resolvedPrePR, err := buildCompactLifecycleSnapshot(ctx, repo, request)
 	if err != nil {
-		return invalid("current repository target cannot be derived: " + err.Error())
+		return invalid("current repository target cannot be derived: "+err.Error(), err)
 	}
 	if request.Gate == GatePrePush && record.State.InitialSnapshot.Kind == TargetCurrentChanges && snapshot.BaseTree == snapshot.CandidateTree {
 		return invalid("pre-push current-changes receipt requires a delivered tree change")
@@ -127,6 +224,12 @@ func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceip
 	}
 	if snapshot.CandidateTree != receipt.FinalCandidateTree || pathsMismatch {
 		gateContext.Denial = &GateDenial{Stage: "receipt-binding", Code: "candidate-or-paths-mismatch"}
+		diagnostics, diagnosticsErr := buildCompactScopeChangeDiagnostics(ctx, repo, record.State, record.Revision, snapshot)
+		if diagnosticsErr != nil {
+			gateContext.Denial = &GateDenial{Stage: "receipt-binding", Code: "scope-diagnostics-unavailable"}
+			return NativeGateEvaluation{Result: GateInvalidated, Reason: "exact scope-change diagnostics cannot be derived: " + diagnosticsErr.Error(), Context: gateContext}
+		}
+		gateContext.ScopeChange = &diagnostics
 		return NativeGateEvaluation{Result: GateScopeChanged, Reason: nativeGateReason(GateScopeChanged), Context: gateContext}
 	}
 	baseMismatch := snapshot.BaseTree != receipt.BaseTree && request.Target.Kind != TargetFixDiff && !compatibleAdvance
@@ -173,6 +276,58 @@ func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceip
 	}
 	finalCompactGateAllowHook()
 	return NativeGateEvaluation{Result: GateAllow, Reason: nativeGateReason(GateAllow), Context: gateContext}
+}
+
+func buildCompactScopeChangeDiagnostics(ctx context.Context, repo string, state CompactState, revision string, actual Snapshot) (GateScopeChangeDiagnostics, error) {
+	expected := state.CurrentSnapshot
+	differing, err := (SnapshotBuilder{Repo: repo}).changedPaths(ctx, expected.CandidateTree, actual.CandidateTree)
+	if err != nil {
+		return GateScopeChangeDiagnostics{}, err
+	}
+	if len(differing) == 0 {
+		differing = differingPathSet(expected.Paths, actual.Paths)
+	}
+	required := []string{
+		"predecessor_lineage_id", "expected_predecessor_revision", "successor_lineage_id", "disposition", "reason", "actor",
+	}
+	return GateScopeChangeDiagnostics{
+		Expected: GateTargetEvidence{
+			BaseTree: expected.BaseTree, CandidateTree: expected.CandidateTree, PathsDigest: expected.PathsDigest,
+			Paths: append([]string{}, expected.Paths...),
+		},
+		Actual: GateTargetEvidence{
+			BaseTree: actual.BaseTree, CandidateTree: actual.CandidateTree, PathsDigest: actual.PathsDigest,
+			Paths: append([]string{}, actual.Paths...),
+		},
+		DifferingPaths: append([]string{}, differing...), DifferingPathCount: len(differing), DifferingPathsDigest: digestPaths(differing),
+		PredecessorLineageID: state.LineageID, PredecessorRevision: revision,
+		RecoveryOperation: "review.recover", RecoveryRequiredInputs: required,
+	}, nil
+}
+
+// CompactScopeChangeDiagnostics derives read-only recovery evidence for a
+// previously assessed compact gate target. It never authorizes, locks, or
+// mutates review authority.
+func CompactScopeChangeDiagnostics(ctx context.Context, repo string, state CompactState, revision string, actual Snapshot) (GateScopeChangeDiagnostics, error) {
+	return buildCompactScopeChangeDiagnostics(ctx, repo, state, revision, actual)
+}
+
+func differingPathSet(left, right []string) []string {
+	counts := make(map[string]int, len(left)+len(right))
+	for _, logicalPath := range left {
+		counts[logicalPath] |= 1
+	}
+	for _, logicalPath := range right {
+		counts[logicalPath] |= 2
+	}
+	differing := make([]string, 0, len(counts))
+	for logicalPath, membership := range counts {
+		if membership != 3 {
+			differing = append(differing, logicalPath)
+		}
+	}
+	sort.Strings(differing)
+	return differing
 }
 
 func buildCompactLifecycleSnapshot(ctx context.Context, repo string, request GateRequest) (Snapshot, *resolvedPrePRRefs, error) {

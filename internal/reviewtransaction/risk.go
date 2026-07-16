@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -175,7 +174,7 @@ func (builder SnapshotBuilder) AssessSnapshotRisk(ctx context.Context, snapshot 
 		if isGeneratedGoldenPath(stat.Path) {
 			continue
 		}
-		onlyNonExecutable = onlyNonExecutable && isNonExecutableReviewPath(stat.Path)
+		onlyNonExecutable = onlyNonExecutable && isLowRiskNonExecutableStat(stat)
 		touchesConfiguration = touchesConfiguration || isConfigurationReviewPath(stat.Path)
 	}
 	risk, err := ClassifyRisk(RiskInput{
@@ -241,7 +240,7 @@ func isServiceTokenReviewPath(logicalPath string) bool {
 }
 
 func isShellReviewPath(logicalPath string) bool {
-	switch asciiLower(filepath.Ext(logicalPath)) {
+	switch asciiLower(path.Ext(logicalPath)) {
 	case ".sh", ".bash", ".zsh":
 		return true
 	default:
@@ -266,7 +265,7 @@ func fallbackRiskReason(stats []DiffStat) RiskReason {
 		if isConfigurationReviewPath(stat.Path) {
 			return RiskReason{Code: RiskReasonConfigurationChange, Path: stat.Path}
 		}
-		if !isNonExecutableReviewPath(stat.Path) {
+		if !isLowRiskNonExecutableStat(stat) {
 			return RiskReason{Code: RiskReasonExecutableChange, Path: stat.Path}
 		}
 	}
@@ -336,20 +335,20 @@ func isSemanticRiskEligible(stat DiffStat) bool {
 			return false
 		}
 	}
-	base := asciiLower(filepath.Base(stat.Path))
+	base := asciiLower(path.Base(stat.Path))
 	if strings.HasPrefix(base, "readme") {
 		return false
 	}
-	if _, ok := semanticSourceExtensions[asciiLower(filepath.Ext(stat.Path))]; ok {
+	if _, ok := semanticSourceExtensions[asciiLower(path.Ext(stat.Path))]; ok {
 		return true
 	}
 	return isConfigurationReviewPath(stat.Path)
 }
 
 func stripSemanticPathExtension(segment string) string {
-	extension := asciiLower(filepath.Ext(segment))
+	extension := asciiLower(path.Ext(segment))
 	if _, source := semanticSourceExtensions[extension]; source || isConfigurationReviewPath(segment) {
-		return strings.TrimSuffix(segment, filepath.Ext(segment))
+		return strings.TrimSuffix(segment, path.Ext(segment))
 	}
 	return segment
 }
@@ -381,17 +380,68 @@ func (builder SnapshotBuilder) ChangedLines(ctx context.Context, snapshot Snapsh
 	return CountChangedLines(stats)
 }
 
-func isNonExecutableReviewPath(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".md", ".mdx", ".rst", ".adoc", ".png", ".jpg", ".jpeg", ".gif", ".svg":
+func isLowRiskNonExecutableStat(stat DiffStat) bool {
+	if stat.Binary || stat.ModeOnly || !isRegularNonExecutableGitMode(stat.OldMode) || !isRegularNonExecutableGitMode(stat.NewMode) {
+		return false
+	}
+	return isNonExecutableReviewPath(stat.Path)
+}
+
+func isRegularNonExecutableGitMode(mode string) bool {
+	switch mode {
+	case "", "000000", "100644":
 		return true
 	default:
 		return false
 	}
 }
 
-func isConfigurationReviewPath(path string) bool {
-	base := strings.ToLower(filepath.Base(path))
+func isNonExecutableReviewPath(logicalPath string) bool {
+	extension := strings.ToLower(path.Ext(logicalPath))
+	switch extension {
+	case ".md":
+		return !isOperationalMarkdownPath(logicalPath)
+	case ".rst", ".adoc", ".png", ".jpg", ".jpeg", ".gif":
+		return true
+	default:
+		return false
+	}
+}
+
+func isOperationalMarkdownPath(logicalPath string) bool {
+	lower := asciiLower(logicalPath)
+	segments := strings.Split(lower, "/")
+	base := path.Base(lower)
+	switch base {
+	case "agents.md", "claude.md", "gemini.md", "kimi.md", "skill.md", "copilot-instructions.md":
+		return true
+	}
+	for index, segment := range segments {
+		switch segment {
+		case ".agent", ".agents", ".claude", ".codex", ".cursor", ".opencode", "openspec", "runtime":
+			return true
+		}
+		if index == 1 && segments[0] == "internal" {
+			switch segment {
+			case "runtime", "assets", "templates":
+				return true
+			}
+		}
+		name := strings.TrimSuffix(segment, path.Ext(segment))
+		for _, token := range strings.FieldsFunc(name, func(r rune) bool {
+			return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+		}) {
+			switch token {
+			case "agent", "agents", "skill", "skills", "prompt", "prompts", "instruction", "instructions", "orchestrator", "orchestrators", "workflow", "workflows":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isConfigurationReviewPath(logicalPath string) bool {
+	base := strings.ToLower(path.Base(logicalPath))
 	if base == ".env" || strings.HasPrefix(base, ".env.") {
 		return true
 	}
@@ -399,7 +449,7 @@ func isConfigurationReviewPath(path string) bool {
 	case "go.mod", "go.sum", "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "dockerfile", "makefile":
 		return true
 	}
-	switch strings.ToLower(filepath.Ext(path)) {
+	switch strings.ToLower(path.Ext(logicalPath)) {
 	case ".json", ".yaml", ".yml", ".toml", ".ini", ".env":
 		return true
 	default:

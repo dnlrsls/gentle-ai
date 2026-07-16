@@ -127,10 +127,38 @@
     ],
     "optional": [
       {
+        "name": "bounded_process_waits",
+        "supported": true,
+        "requires": [
+          "uniform_failure_envelope"
+        ]
+      },
+      {
+        "name": "exact_gate_receipt_discovery",
+        "supported": true,
+        "requires": [
+          "five_delivery_gates"
+        ]
+      },
+      {
+        "name": "native_low_risk_verification",
+        "supported": true,
+        "requires": [
+          "compact_v2_authority"
+        ]
+      },
+      {
         "name": "risk_reasons",
         "supported": true,
         "requires": [
           "repository_independent_capabilities"
+        ]
+      },
+      {
+        "name": "scope_change_diagnostics",
+        "supported": true,
+        "requires": [
+          "uniform_failure_envelope"
         ]
       }
     ]

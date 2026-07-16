@@ -819,6 +819,21 @@ func TestCompactStoreReplacesCurrentStateWithCASAndExactRetry(t *testing.T) {
 	}
 }
 
+func TestCompactStoreReplaceContextRejectsCancelledMutation(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	writeSnapshotFile(t, repo, "tracked.txt", "candidate\n")
+	state := newCompactTestState(t, repo, "compact-cancelled-replace")
+	store, _ := CompactAuthoritativeStore(context.Background(), repo, state.LineageID)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := store.ReplaceContext(ctx, "", "review/start", state); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReplaceContext() error = %v, want context.Canceled", err)
+	}
+	if _, err := os.Stat(store.StatePath()); !os.IsNotExist(err) {
+		t.Fatalf("cancelled replacement published authority: %v", err)
+	}
+}
+
 func TestCompactCorrectionRetriesWithinFrozenBudgetAndFindingScope(t *testing.T) {
 	repo := initSnapshotRepo(t)
 	writeSnapshotFile(t, repo, "tracked.txt", "base\none\ntwo\nthree\nfour\n")
@@ -1429,6 +1444,83 @@ func storeCompactStartAuthority(t *testing.T, repo string, state CompactState) C
 		t.Fatal(err)
 	}
 	return store
+}
+
+func TestCompactV2ReadsLegacyNullLensArraysWithoutRewritingAuthority(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	if err := os.MkdirAll(filepath.Join(repo, "docs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "docs", "legacy.md"), []byte("legacy documentation\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	state := newCompactTestState(t, repo, "compact-legacy-null-lenses")
+	if state.RiskLevel != RiskLow || len(state.SelectedLenses) != 0 {
+		t.Fatalf("fixture is not zero-lens low risk: %#v", state)
+	}
+	state.SelectedLenses = nil
+	if err := state.CompleteReview(CompactReviewInput{LensResults: []LensResult{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CompleteVerification([]byte("legacy evidence\n"), true); err != nil {
+		t.Fatal(err)
+	}
+	state.SelectedLenses = nil
+	record, statePayload, err := makeCompactRecord(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := CompactAuthoritativeStore(context.Background(), repo, state.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(store.Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.StatePath(), statePayload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := state.Receipt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.SelectedLenses = nil
+	receiptPayload, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptPayload = append(receiptPayload, '\n')
+	if err := os.WriteFile(store.ReceiptPath(), receiptPayload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Revision != record.Revision || loaded.State.SelectedLenses != nil {
+		t.Fatalf("loaded legacy state = %#v", loaded)
+	}
+	parsedReceipt, err := ParseCompactReceipt(receiptPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authoritative, err := loaded.State.Receipt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsedReceipt.SelectedLenses == nil || parsedReceipt.ResolvedFindingIDs != nil {
+		t.Fatalf("parsed legacy receipt = %#v", parsedReceipt)
+	}
+	if !reflect.DeepEqual(parsedReceipt, authoritative) {
+		t.Fatalf("parsed receipt differs from authority:\nparsed=%#v\nauthority=%#v", parsedReceipt, authoritative)
+	}
+	if got, err := os.ReadFile(store.StatePath()); err != nil || !bytes.Equal(got, statePayload) {
+		t.Fatalf("legacy state bytes changed: %v", err)
+	}
+	if got, err := os.ReadFile(store.ReceiptPath()); err != nil || !bytes.Equal(got, receiptPayload) {
+		t.Fatalf("legacy receipt bytes changed: %v", err)
+	}
 }
 
 func newCompactStartStateForTarget(t *testing.T, repo, lineage string, target Target) CompactState {

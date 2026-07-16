@@ -197,7 +197,11 @@ func reviewCapabilitiesStaticSurface() ReviewCapabilitiesResult {
 				{Name: "uniform_failure_envelope", Supported: true, Requires: []string{"repository_independent_capabilities"}},
 			},
 			Optional: []ReviewCapabilityFeature{
+				{Name: "bounded_process_waits", Supported: true, Requires: []string{"uniform_failure_envelope"}},
+				{Name: "exact_gate_receipt_discovery", Supported: true, Requires: []string{"five_delivery_gates"}},
+				{Name: "native_low_risk_verification", Supported: true, Requires: []string{"compact_v2_authority"}},
 				{Name: "risk_reasons", Supported: true, Requires: []string{"repository_independent_capabilities"}},
+				{Name: "scope_change_diagnostics", Supported: true, Requires: []string{"uniform_failure_envelope"}},
 			},
 		},
 		Compatibility: ReviewCapabilitiesCompatibility{
@@ -292,7 +296,7 @@ func (result ReviewCapabilitiesResult) Validate() error {
 	if result.Schema != static.Schema || result.Contract != static.Contract || result.Protocol != static.Protocol ||
 		!reflect.DeepEqual(result.Operations, static.Operations) || !reflect.DeepEqual(result.Gates, static.Gates) ||
 		!reflect.DeepEqual(result.Projections, static.Projections) || !reflect.DeepEqual(result.Schemas, static.Schemas) ||
-		!reflect.DeepEqual(result.Features, static.Features) || !reflect.DeepEqual(result.Compatibility, static.Compatibility) {
+		!reflect.DeepEqual(result.Features.Mandatory, static.Features.Mandatory) || !reflect.DeepEqual(result.Features.Optional, static.Features.Optional) || !reflect.DeepEqual(result.Compatibility, static.Compatibility) {
 		return errors.New("capability surface does not match the negotiated v1 contract")
 	}
 	if result.Package.Name != "gentle-ai" || strings.TrimSpace(result.Package.Version) == "" || result.Package.ReleaseChannel != reviewReleaseChannel(result.Package.Version) {

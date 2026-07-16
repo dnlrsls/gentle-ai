@@ -1,16 +1,71 @@
 {
   "schema": "gentle-ai.review-integration.failure/v1",
   "contract": "gentle-ai.review-integration/v1",
-  "operation": "review.finalize",
-  "phase": "native_committed",
-  "code": "receipt_publication_pending",
-  "message": "Receipt publication did not complete after terminal authority was committed.",
-  "mutation_outcome": "committed",
+  "operation": "review.validate",
+  "phase": "preflight",
+  "code": "gate_scope_changed",
+  "message": "The review delivery gate denied the current target.",
+  "mutation_outcome": "not_started",
   "authority_applicability": "current_target",
   "retry_safe": false,
-  "replayability": "exact_replay_safe",
+  "replayability": "manual_action_required",
   "lineage_id": "review-failure-fixture",
-  "request_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "required_inputs": ["lineage_id"],
-  "next_action": "review.finalize"
+  "required_inputs": [
+    "predecessor_lineage_id",
+    "expected_predecessor_revision",
+    "successor_lineage_id",
+    "disposition",
+    "reason",
+    "actor"
+  ],
+  "next_action": "explicit-maintainer-action",
+  "context": {
+    "gate": "post-apply",
+    "lineage_id": "review-failure-fixture",
+    "generation": 1,
+    "store_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "genesis_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "chain_identity": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bundle_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "base_tree": "1111111111111111111111111111111111111111",
+    "candidate_tree": "3333333333333333333333333333333333333333",
+    "paths_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "fix_delta_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "policy_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "ledger_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "evidence_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+    "base_relationship_valid": true,
+    "denial": {
+      "stage": "receipt-binding",
+      "code": "candidate-or-paths-mismatch"
+    },
+    "scope_change": {
+      "expected": {
+        "base_tree": "1111111111111111111111111111111111111111",
+        "candidate_tree": "2222222222222222222222222222222222222222",
+        "paths_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "paths": ["docs/guide.md"]
+      },
+      "actual": {
+        "base_tree": "1111111111111111111111111111111111111111",
+        "candidate_tree": "3333333333333333333333333333333333333333",
+        "paths_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "paths": ["docs/guide.md"]
+      },
+      "differing_paths": ["docs/guide.md"],
+      "differing_path_count": 1,
+      "differing_paths_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "predecessor_lineage_id": "review-failure-fixture",
+      "predecessor_revision": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "recovery_operation": "review.recover",
+      "recovery_required_inputs": [
+        "predecessor_lineage_id",
+        "expected_predecessor_revision",
+        "successor_lineage_id",
+        "disposition",
+        "reason",
+        "actor"
+      ]
+    }
+  }
 }

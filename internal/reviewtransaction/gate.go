@@ -101,6 +101,7 @@ type NativeGateEvaluation struct {
 	Result  GateResult
 	Reason  string
 	Context GateContext
+	Cause   error `json:"-"`
 }
 
 var finalGateAuthorizationHook = func() {}

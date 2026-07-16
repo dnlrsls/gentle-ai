@@ -621,6 +621,7 @@ func TestReviewFacadeDeniedGateRetainsObservedBoundaryWithoutAuthorizing(t *test
 	evaluation := reviewtransaction.NativeGateEvaluation{
 		Result: reviewtransaction.GateInvalidated,
 		Reason: "current repository target cannot be derived: explicit base is unavailable",
+		Cause:  &reviewtransaction.GitCommandTimeoutError{Cause: context.DeadlineExceeded},
 		Context: reviewtransaction.GateContext{
 			Gate: reviewtransaction.GatePrePR, LineageID: "review-boundary-context", Generation: 1,
 			PrePRBoundary: &reviewtransaction.PrePRBoundarySelection{
@@ -629,7 +630,7 @@ func TestReviewFacadeDeniedGateRetainsObservedBoundaryWithoutAuthorizing(t *test
 			Denial: &reviewtransaction.GateDenial{Stage: "boundary-selection", Code: "unavailable"},
 		},
 	}
-	if err := emitFacadeGateEvaluation(&output, evaluation); err == nil {
+	if err := emitFacadeGateEvaluation(&output, evaluation); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal("denied gate returned success")
 	}
 	var result ReviewValidateResult
@@ -796,6 +797,106 @@ func TestReviewFacadeCorrectionFlowResumesFromEachCompactIntermediateState(t *te
 	}
 	if committedReuse.Action != "reuse-receipt" || committedReuse.LensesRequired || committedReuse.LineageID != started.LineageID || committedReuse.State != reviewtransaction.StateApproved {
 		t.Fatalf("equivalent committed corrected target did not reuse receipt: %#v", committedReuse)
+	}
+}
+
+func TestReviewFacadeStartCannotResetActiveCorrectionBudget(t *testing.T) {
+	tests := []struct {
+		name       string
+		consumed   bool
+		negotiated bool
+	}{
+		{name: "pre-forecast raw"},
+		{name: "pre-forecast negotiated", negotiated: true},
+		{name: "consumed attempt raw", consumed: true},
+		{name: "consumed attempt negotiated", consumed: true, negotiated: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := initReviewCLIRepo(t)
+			write := func(value string) {
+				t.Helper()
+				content := fmt.Sprintf("base\none\ntwo\nthree\n%s\n", value)
+				if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("wrong")
+			started := startFacadeReview(t, repo)
+			reviewer := filepath.Join(t.TempDir(), "reviewer.json")
+			writeReviewCLIJSON(t, reviewer, facadeReviewerResult{Findings: []facadeFinding{{
+				Location: "tracked.txt:5", Severity: "CRITICAL", Claim: "wrong value", ProofRefs: []string{"candidate-only failure"},
+				EvidenceClass: reviewtransaction.EvidenceDeterministic, CausalDisposition: reviewtransaction.CausalIntroduced,
+			}}, Evidence: []string{"focused differential failure"}})
+			if err := RunReviewFacadeFinalize([]string{"--cwd", repo, "--result", reviewer}, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			store, _ := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, started.LineageID)
+			if tt.consumed {
+				if err := RunReviewFacadeFinalize([]string{"--cwd", repo, "--correction-lines", "2"}, io.Discard); err != nil {
+					t.Fatal(err)
+				}
+				write("first-fix")
+				validator := filepath.Join(t.TempDir(), "validator.json")
+				writeReviewCLIJSON(t, validator, facadeValidationResult{
+					OriginalCriteria:     facadeValidationCheck{Passed: false, Evidence: []string{"acceptance still fails"}},
+					CorrectionRegression: facadeValidationCheck{Passed: false, Evidence: []string{"regression still fails"}}, FollowUps: []reviewtransaction.FollowUp{},
+				})
+				if err := RunReviewFacadeFinalize([]string{"--cwd", repo, "--validation", validator}, io.Discard); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantAttempts, wantLines := 0, 0
+			if tt.consumed {
+				wantAttempts, wantLines = 1, 2
+			}
+			if before.State.State != reviewtransaction.StateCorrectionRequired || len(before.State.CorrectionAttempts) != wantAttempts || before.State.CumulativeCorrectionLines != wantLines {
+				t.Fatalf("predecessor fixture = %#v", before.State)
+			}
+			write("second-byte-only-edit")
+
+			var statusOutput bytes.Buffer
+			if err := RunReviewStatus([]string{"--cwd", repo, "--contract", ReviewIntegrationContractV1, "--lineage", started.LineageID}, &statusOutput); err != nil {
+				t.Fatal(err)
+			}
+			var status ReviewTargetStatusResult
+			if err := json.Unmarshal(statusOutput.Bytes(), &status); err != nil {
+				t.Fatal(err)
+			}
+			if status.Applicability != reviewtransaction.TargetApplicabilityCurrent || status.Authority == nil || status.Authority.LineageID != started.LineageID || status.Authority.State != reviewtransaction.StateCorrectionRequired || status.Action != reviewtransaction.TargetStatusActionFinalize {
+				t.Errorf("in-genesis correction status = %#v", status)
+			}
+
+			var output bytes.Buffer
+			if tt.negotiated {
+				err = RunReview([]string{"start", "--cwd", repo, "--contract", ReviewIntegrationContractV1}, &output)
+			} else {
+				err = RunReviewFacadeStart([]string{"--cwd", repo}, &output)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				Action    string                  `json:"action"`
+				LineageID string                  `json:"lineage_id"`
+				State     reviewtransaction.State `json:"state"`
+			}
+			if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Action != string(reviewtransaction.CompactStartBlocked) || got.LineageID != started.LineageID || got.State != reviewtransaction.StateCorrectionRequired {
+				t.Errorf("in-genesis correction START = %#v", got)
+			}
+			after, _ := store.Load()
+			stores, discoverErr := reviewtransaction.DiscoverCompactStores(context.Background(), repo)
+			if discoverErr != nil || after.Revision != before.Revision || after.State.CumulativeCorrectionLines != wantLines || len(after.State.CorrectionAttempts) != wantAttempts || len(stores) != 1 {
+				t.Fatalf("START reset or mutated correction authority: before=%#v after=%#v stores=%d err=%v", before, after, len(stores), discoverErr)
+			}
+		})
 	}
 }
 
@@ -1365,7 +1466,9 @@ func TestReviewBindSDDAcceptsEqualsFormForEmptyExpectedRevision(t *testing.T) {
 	if err := os.WriteFile(evidence, []byte("tests pass\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := RunReviewFacadeFinalize([]string{"--cwd", repo, "--lineage", started.LineageID, "--evidence", evidence}, io.Discard); err != nil {
+	args := append([]string{"--cwd", repo, "--lineage", started.LineageID}, facadeReviewerResultArgs(t, started)...)
+	args = append(args, "--evidence", evidence)
+	if err := RunReviewFacadeFinalize(args, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if err := RunReview([]string{"bind-sdd", "--cwd", repo, "--change", "thin", "--lineage", started.LineageID, "--expected-binding-revision="}, io.Discard); err != nil {
@@ -1400,7 +1503,9 @@ func TestReviewBindSDDFeedsSelectedSDDStatusRuntime(t *testing.T) {
 	if err := os.WriteFile(evidence, []byte("tests pass\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := RunReviewFacadeFinalize([]string{"--cwd", repo, "--lineage", started.LineageID, "--evidence", evidence}, io.Discard); err != nil {
+	args := append([]string{"--cwd", repo, "--lineage", started.LineageID}, facadeReviewerResultArgs(t, started)...)
+	args = append(args, "--evidence", evidence)
+	if err := RunReviewFacadeFinalize(args, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	runReviewCLIGit(t, repo, "add", "-A")
@@ -1584,6 +1689,19 @@ func startFacadeReview(t *testing.T, repo string) ReviewFacadeStartResult {
 		t.Fatal(err)
 	}
 	return result
+}
+
+func facadeReviewerResultArgs(t *testing.T, started ReviewFacadeStartResult) []string {
+	t.Helper()
+	args := []string{}
+	for index, lens := range started.SelectedLenses {
+		resultPath := filepath.Join(t.TempDir(), fmt.Sprintf("reviewer-%d.json", index))
+		writeReviewCLIJSON(t, resultPath, facadeReviewerResult{
+			Lens: lens, Findings: []facadeFinding{}, Evidence: []string{"reviewed exact candidate tree"},
+		})
+		args = append(args, "--result", resultPath)
+	}
+	return args
 }
 
 func decodeFacadeFinalize(t *testing.T, payload []byte) ReviewFacadeFinalizeResult {

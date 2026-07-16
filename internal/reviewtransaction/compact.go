@@ -16,6 +16,7 @@ import (
 
 const CompactStateSchema = "gentle-ai.review-state/v2"
 const CompactReceiptSchema = "gentle-ai.review-receipt/v2"
+const NativeLowRiskVerificationDomain = "gentle-ai.native-low-risk-verification/v1"
 
 const (
 	StateCorrectionRequired      State = "correction_required"
@@ -608,7 +609,8 @@ func compactPristineReviewing(state CompactState) bool {
 	return state.State == StateReviewing && snapshotsEqual(state.CurrentSnapshot, state.InitialSnapshot) &&
 		len(state.LensResults) == 0 && len(state.Findings) == 0 && len(state.Classifications) == 0 && len(state.Outcomes) == 0 &&
 		len(state.FixFindingIDs) == 0 && len(state.FollowUps) == 0 && state.ProposedCorrectionLines == nil && state.ActualCorrectionLines == nil &&
-		state.FixDeltaHash == EmptyFixDeltaHash && state.OriginalCriteria == nil && state.CorrectionRegression == nil && state.EvidenceHash == "" && state.InvalidationReason == ""
+		state.FixDeltaHash == EmptyFixDeltaHash && state.OriginalCriteria == nil && state.CorrectionRegression == nil && state.EvidenceHash == "" && state.InvalidationReason == "" &&
+		len(state.CorrectionAttempts) == 0 && state.CumulativeCorrectionLines == 0
 }
 
 func (state *CompactState) BeginCorrection(proposed int) error {
@@ -714,10 +716,59 @@ func (state CompactState) Receipt() (CompactReceipt, error) {
 		BaseTree:   state.InitialSnapshot.BaseTree, InitialReviewTree: state.InitialSnapshot.CandidateTree,
 		FinalCandidateTree: state.CurrentSnapshot.CandidateTree, PathsDigest: state.InitialSnapshot.PathsDigest,
 		FixDeltaHash: state.FixDeltaHash, PolicyHash: state.PolicyHash, EvidenceHash: evidence,
-		RiskLevel: state.RiskLevel, SelectedLenses: append([]string(nil), state.SelectedLenses...),
+		RiskLevel: state.RiskLevel, SelectedLenses: append([]string{}, state.SelectedLenses...),
 		ResolvedFindingIDs: append([]string(nil), state.FixFindingIDs...), TerminalState: terminal,
 	}
-	return receipt, receipt.Validate()
+	if err := receipt.Validate(); err != nil {
+		return CompactReceipt{}, err
+	}
+	return receipt, nil
+}
+
+// NativeLowRiskVerificationEvidence returns the canonical structural evidence
+// used only for a genuine low-risk, zero-lens, uncorrected compact review. The
+// state machine still completes review before final verification; this preimage
+// merely removes the need for a caller-created evidence file when native Git
+// and risk evidence already prove the exact frozen target.
+func NativeLowRiskVerificationEvidence(state CompactState, assessment RiskAssessment) ([]byte, error) {
+	if state.State != StateReviewing && state.State != StateValidating && state.State != StateApproved {
+		return nil, fmt.Errorf("native low-risk verification cannot run from compact state %q", state.State)
+	}
+	if err := state.Validate(); err != nil {
+		return nil, fmt.Errorf("validate native low-risk authority: %w", err)
+	}
+	if state.RiskLevel != RiskLow || assessment.Level != RiskLow || len(state.SelectedLenses) != 0 ||
+		len(state.LensResults) != 0 || len(state.Findings) != 0 || len(state.FixFindingIDs) != 0 ||
+		state.ProposedCorrectionLines != nil || state.ActualCorrectionLines != nil ||
+		len(state.CorrectionAttempts) != 0 || state.CumulativeCorrectionLines != 0 ||
+		state.FixDeltaHash != EmptyFixDeltaHash || !snapshotsEqual(state.InitialSnapshot, state.CurrentSnapshot) {
+		return nil, errors.New("native low-risk verification requires an uncorrected zero-lens low-risk authority")
+	}
+	if assessment.ChangedLines != state.OriginalChangedLines {
+		return nil, errors.New("native low-risk verification changed-line count does not match frozen authority")
+	}
+	preimage := struct {
+		Schema               string         `json:"schema"`
+		LineageID            string         `json:"lineage_id"`
+		Generation           int            `json:"generation"`
+		Snapshot             Snapshot       `json:"snapshot"`
+		PolicyHash           string         `json:"policy_hash"`
+		Risk                 RiskAssessment `json:"risk"`
+		SelectedLenses       []string       `json:"selected_lenses"`
+		CorrectionBudget     int            `json:"correction_budget"`
+		OriginalChangedLines int            `json:"original_changed_lines"`
+		FixDeltaHash         string         `json:"fix_delta_hash"`
+	}{
+		Schema: NativeLowRiskVerificationDomain, LineageID: state.LineageID, Generation: state.Generation,
+		Snapshot: state.InitialSnapshot, PolicyHash: state.PolicyHash, Risk: assessment,
+		SelectedLenses: []string{}, CorrectionBudget: state.CorrectionBudget,
+		OriginalChangedLines: state.OriginalChangedLines, FixDeltaHash: state.FixDeltaHash,
+	}
+	payload, err := json.Marshal(preimage)
+	if err != nil {
+		return nil, fmt.Errorf("marshal native low-risk verification evidence: %w", err)
+	}
+	return append([]byte(NativeLowRiskVerificationDomain+"\x00"), payload...), nil
 }
 
 func (receipt CompactReceipt) Validate() error {
@@ -762,7 +813,11 @@ func ParseCompactReceipt(payload []byte) (CompactReceipt, error) {
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return CompactReceipt{}, errors.New("multiple JSON values in compact review receipt")
 	}
-	return receipt, receipt.Validate()
+	if err := receipt.Validate(); err != nil {
+		return CompactReceipt{}, err
+	}
+	normalizeCompactReceipt(&receipt)
+	return receipt, nil
 }
 
 func WriteCompactReceiptAtomic(path string, receipt CompactReceipt) error {
@@ -831,7 +886,19 @@ func normalizeCompactState(state *CompactState) {
 }
 
 func compactReceiptEqual(left, right CompactReceipt) bool {
+	normalizeCompactReceipt(&left)
+	normalizeCompactReceipt(&right)
 	return reflect.DeepEqual(left, right)
+}
+func CompactReceiptEqual(left, right CompactReceipt) bool { return compactReceiptEqual(left, right) }
+
+func normalizeCompactReceipt(receipt *CompactReceipt) {
+	if len(receipt.SelectedLenses) == 0 {
+		receipt.SelectedLenses = []string{}
+	}
+	if len(receipt.ResolvedFindingIDs) == 0 {
+		receipt.ResolvedFindingIDs = nil
+	}
 }
 
 func CompactReceiptSchemaOf(payload []byte) string {

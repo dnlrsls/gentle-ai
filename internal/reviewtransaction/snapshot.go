@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type TargetKind string
@@ -795,15 +796,117 @@ func writeLengthPrefixed(writer byteWriter, value []byte) {
 	_, _ = writer.Write([]byte{0})
 }
 
+var ErrGitCommandTimeout = errors.New("git command timed out")
+
+type GitCommandTimeoutError struct {
+	Args      []string
+	Timeout   time.Duration
+	Remote    bool
+	Aggregate bool
+	Cause     error
+}
+
+func (err *GitCommandTimeoutError) Error() string {
+	scope := "local"
+	if err.Remote {
+		scope = "remote"
+	}
+	if err.Aggregate {
+		scope = "aggregate"
+	}
+	return fmt.Sprintf("%v within %s %s budget", ErrGitCommandTimeout, err.Timeout, scope)
+}
+
+func (err *GitCommandTimeoutError) Unwrap() []error {
+	causes := []error{ErrGitCommandTimeout}
+	if err.Cause != nil {
+		causes = append(causes, err.Cause)
+	}
+	return causes
+}
+
+type GitCommandError struct {
+	Args     []string
+	ExitCode int
+	Remote   bool
+	Cause    error
+	Output   string
+}
+
+func (err *GitCommandError) Error() string {
+	message := fmt.Sprintf("git %s failed with exit code %d", strings.Join(err.Args, " "), err.ExitCode)
+	if err.Output != "" {
+		message += ": " + err.Output
+	}
+	return message
+}
+
+func (err *GitCommandError) Unwrap() error { return err.Cause }
+
+var localGitCommandTimeout = 15 * time.Second
+var remoteGitCommandTimeout = 20 * time.Second
+var gitCommandWaitDelay = time.Second
+var gitCommandContext = exec.CommandContext
+
 func runGit(ctx context.Context, repo string, extraEnv []string, stdin []byte, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, "git", append([]string{"--no-replace-objects", "-C", repo}, args...)...)
+	remote := len(args) > 0 && args[0] == "ls-remote"
+	timeout := localGitCommandTimeout
+	if remote {
+		timeout = remoteGitCommandTimeout
+	}
+	commandContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	command := gitCommandContext(commandContext, "git", append([]string{"--no-replace-objects", "-C", repo}, args...)...)
+	command.Cancel = nil
+	command.WaitDelay = gitCommandWaitDelay
 	command.Env = sanitizedGitEnvironment(os.Environ(), extraEnv)
 	if stdin != nil {
 		command.Stdin = bytes.NewReader(stdin)
 	}
-	output, err := command.CombinedOutput()
+	var buffer bytes.Buffer
+	command.Stdout, command.Stderr = &buffer, &buffer
+	release, err := startGitProcessTree(command)
+	if err == nil {
+		released := make(chan struct{})
+		stopRelease := context.AfterFunc(commandContext, func() { _ = release(); close(released) })
+		err = command.Wait()
+		if stopRelease() {
+			_ = release()
+		} else {
+			<-released
+		}
+	}
+	if err != nil && release != nil && command.ProcessState == nil {
+		_ = release()
+	}
+	if err != nil && command.Process != nil && command.ProcessState == nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	}
+	output := buffer.Bytes()
+	if errors.Is(err, exec.ErrWaitDelay) && commandContext.Err() == nil {
+		err = nil
+	}
 	if err != nil {
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+		if commandContext.Err() != nil {
+			cause := commandContext.Err()
+			aggregate := ctx.Err() != nil
+			if aggregate {
+				cause = ctx.Err()
+			}
+			return nil, &GitCommandTimeoutError{
+				Args: append([]string{}, args...), Timeout: timeout, Remote: remote, Aggregate: aggregate, Cause: cause,
+			}
+		}
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		return nil, &GitCommandError{
+			Args: append([]string{}, args...), ExitCode: exitCode, Remote: remote, Cause: err,
+			Output: strings.TrimSpace(string(output)),
+		}
 	}
 	return output, nil
 }

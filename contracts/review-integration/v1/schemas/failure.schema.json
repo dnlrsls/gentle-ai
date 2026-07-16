@@ -31,16 +31,132 @@
     "authority_applicability": {"enum": ["current_target", "unrelated", "ambiguous", "corrupted", "not_evaluated"]},
     "retry_safe": {"type": "boolean"},
     "replayability": {"enum": ["not_replayable", "exact_replay_safe", "status_required", "manual_action_required"]},
-    "lineage_id": {"type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "lineage_id": {"type": "string", "maxLength": 128, "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
     "request_digest": {"$ref": "#/$defs/sha256"},
     "required_inputs": {
       "type": "array",
       "uniqueItems": true,
-      "items": {"enum": ["lineage_id"]}
+      "items": {
+        "enum": [
+          "lineage_id",
+          "predecessor_lineage_id",
+          "expected_predecessor_revision",
+          "successor_lineage_id",
+          "disposition",
+          "reason",
+          "actor"
+        ]
+      }
     },
-    "next_action": {"enum": ["correct_request", "retry", "review.status", "review.finalize", "explicit-maintainer-action", "stop"]}
+    "next_action": {"enum": ["correct_request", "retry", "review.status", "review.finalize", "explicit-maintainer-action", "stop"]},
+    "context": {"$ref": "#/$defs/gate_context"}
   },
   "$defs": {
-    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "tree": {"type": "string", "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$"},
+    "path_array": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "denial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "code"],
+      "properties": {
+        "stage": {"type": "string", "minLength": 1},
+        "code": {"type": "string", "minLength": 1}
+      }
+    },
+    "target_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base_tree", "candidate_tree", "paths_digest", "paths"],
+      "properties": {
+        "base_tree": {"$ref": "#/$defs/tree"},
+        "candidate_tree": {"$ref": "#/$defs/tree"},
+        "paths_digest": {"$ref": "#/$defs/sha256"},
+        "paths": {"$ref": "#/$defs/path_array"}
+      }
+    },
+    "scope_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected",
+        "actual",
+        "differing_paths",
+        "differing_path_count",
+        "differing_paths_digest",
+        "predecessor_lineage_id",
+        "predecessor_revision",
+        "recovery_operation",
+        "recovery_required_inputs"
+      ],
+      "properties": {
+        "expected": {"$ref": "#/$defs/target_evidence"},
+        "actual": {"$ref": "#/$defs/target_evidence"},
+        "differing_paths": {"$ref": "#/$defs/path_array"},
+        "differing_path_count": {"type": "integer", "minimum": 0},
+        "differing_paths_digest": {"$ref": "#/$defs/sha256"},
+        "predecessor_lineage_id": {"type": "string", "maxLength": 128, "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+        "predecessor_revision": {"$ref": "#/$defs/sha256"},
+        "recovery_operation": {"const": "review.recover"},
+        "recovery_required_inputs": {
+          "type": "array",
+          "prefixItems": [
+            {"const": "predecessor_lineage_id"},
+            {"const": "expected_predecessor_revision"},
+            {"const": "successor_lineage_id"},
+            {"const": "disposition"},
+            {"const": "reason"},
+            {"const": "actor"}
+          ],
+          "items": false
+        }
+      }
+    },
+    "gate_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gate",
+        "lineage_id",
+        "generation",
+        "store_revision",
+        "genesis_revision",
+        "chain_identity",
+        "bundle_digest",
+        "base_tree",
+        "candidate_tree",
+        "paths_digest",
+        "fix_delta_hash",
+        "policy_hash",
+        "ledger_hash",
+        "evidence_hash",
+        "base_relationship_valid",
+        "denial",
+        "scope_change"
+      ],
+      "properties": {
+        "gate": {"enum": ["post-apply", "pre-commit", "pre-push", "pre-pr", "release"]},
+        "lineage_id": {"type": "string", "maxLength": 128, "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
+        "generation": {"type": "integer", "minimum": 1},
+        "store_revision": {"$ref": "#/$defs/sha256"},
+        "genesis_revision": {"$ref": "#/$defs/sha256"},
+        "chain_identity": {"$ref": "#/$defs/sha256"},
+        "bundle_digest": {"$ref": "#/$defs/sha256"},
+        "base_tree": {"$ref": "#/$defs/tree"},
+        "candidate_tree": {"$ref": "#/$defs/tree"},
+        "paths_digest": {"$ref": "#/$defs/sha256"},
+        "fix_delta_hash": {"$ref": "#/$defs/sha256"},
+        "policy_hash": {"$ref": "#/$defs/sha256"},
+        "ledger_hash": {"$ref": "#/$defs/sha256"},
+        "evidence_hash": {"$ref": "#/$defs/sha256"},
+        "base_relationship_valid": {"type": "boolean"},
+        "denial": {"$ref": "#/$defs/denial"},
+        "scope_change": {"$ref": "#/$defs/scope_change"}
+      }
+    }
   }
 }

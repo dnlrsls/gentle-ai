@@ -1251,7 +1251,7 @@ func validateSelectedLenses(mode Mode, riskLevel RiskLevel, lenses []string) ([]
 		}
 		return nil, nil
 	}
-	validated := append([]string(nil), lenses...)
+	validated := append([]string{}, lenses...)
 	want := -1
 	switch riskLevel {
 	case RiskLow:

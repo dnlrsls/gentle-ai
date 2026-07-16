@@ -14,6 +14,8 @@ import (
 
 const ReviewAuthorityStatusSchema = "gentle-ai.review-authority-status/v1"
 
+var probeExistingStoreLock = tryLockFile
+
 type AuthorityStatus string
 
 const (
@@ -39,6 +41,7 @@ type AuthorityLockStatus string
 
 const (
 	AuthorityLockOwned     AuthorityLockStatus = "owned"
+	AuthorityLockReleased  AuthorityLockStatus = "released"
 	AuthorityLockAmbiguous AuthorityLockStatus = "ambiguous"
 )
 
@@ -52,6 +55,7 @@ type AuthorityInventoryEntry struct {
 	ChainIdentity string                     `json:"chain_identity,omitempty"`
 	Recovery      *CompactRecoveryProvenance `json:"recovery,omitempty"`
 	Problems      []string                   `json:"problems"`
+	compact       *CompactRecord
 }
 
 type AuthorityLockEvidence struct {
@@ -226,6 +230,7 @@ func inventoryLineage(ctx context.Context, repo string, version AuthorityVersion
 			return entry, locks
 		}
 		entry.Revision, entry.State, entry.Recovery = record.Revision, record.State.State, record.State.Recovery
+		entry.compact = &record
 		entry.Status = authorityStatusForState(record.State.State)
 		if payload, err := os.ReadFile(store.ReceiptPath()); err == nil {
 			receipt, parseErr := ParseCompactReceipt(payload)
@@ -282,15 +287,16 @@ func authorityStatusForState(state State) AuthorityStatus {
 }
 
 func inventoryLock(version AuthorityVersion, lineage, path string) (AuthorityLockEvidence, bool) {
-	payload, err := os.ReadFile(path)
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return AuthorityLockEvidence{}, false
 		}
-		return AuthorityLockEvidence{Version: version, LineageID: lineage, Path: path, Status: AuthorityLockAmbiguous, Problem: "read lock owner: " + err.Error()}, true
+		return AuthorityLockEvidence{Version: version, LineageID: lineage, Path: path, Status: AuthorityLockAmbiguous, Problem: "open existing lock inode: " + err.Error()}, true
 	}
+	defer file.Close()
 	lock := AuthorityLockEvidence{Version: version, LineageID: lineage, Path: path, Status: AuthorityLockAmbiguous}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
 	var owner storeLockOwner
 	if err := decoder.Decode(&owner); err != nil {
@@ -306,7 +312,20 @@ func inventoryLock(version AuthorityVersion, lineage, path string) (AuthorityLoc
 		lock.Problem = "lock owner metadata is incomplete or invalid"
 		return lock, true
 	}
-	lock.Status, lock.Owner = AuthorityLockOwned, &owner
+	locked, err := probeExistingStoreLock(file)
+	if err != nil {
+		lock.Problem = "probe existing lock inode: " + err.Error()
+		return lock, true
+	}
+	if !locked {
+		lock.Status = AuthorityLockOwned
+		return lock, true
+	}
+	if err := unlockFile(file); err != nil {
+		lock.Problem = "release existing lock probe: " + err.Error()
+		return lock, true
+	}
+	lock.Status = AuthorityLockReleased
 	return lock, true
 }
 
@@ -326,14 +345,14 @@ func markCompactGraph(report *AuthorityStatusReport) {
 			continue
 		}
 		predecessor, ok := byLineage[entry.Recovery.PredecessorLineageID]
-		if !ok || report.Entries[predecessor].Revision != entry.Recovery.PredecessorRevision {
+		if !ok || entry.compact == nil || report.Entries[predecessor].compact == nil {
 			entry.Status = AuthorityStatusInvalid
-			entry.Problems = append(entry.Problems, "recovery predecessor is missing or revision-mismatched")
+			entry.Problems = append(entry.Problems, "recovery predecessor is missing")
 			continue
 		}
-		if (report.Entries[predecessor].State == StateInvalidated) != (entry.Recovery.Disposition == RecoveryInvalidated) {
+		if err := validateCompactRecoveryEdge(*report.Entries[predecessor].compact, entry.compact.State); err != nil {
 			entry.Status = AuthorityStatusInvalid
-			entry.Problems = append(entry.Problems, "recovery predecessor does not match disposition")
+			entry.Problems = append(entry.Problems, "invalid recovery edge: "+err.Error())
 			continue
 		}
 		children[entry.Recovery.PredecessorLineageID] = append(children[entry.Recovery.PredecessorLineageID], index)

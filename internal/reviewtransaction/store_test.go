@@ -148,8 +148,65 @@ func TestStoreLockReportsLiveOwnerAndCannotBeStolen(t *testing.T) {
 	tx := newTestTransaction(t, ModeOrdinary4R)
 	_ = tx.StartReview()
 	_, err = store.Append("", Record{Operation: "review/start", Transaction: *tx})
-	if !errors.Is(err, ErrConcurrentUpdate) || !strings.Contains(err.Error(), "pid=") || !strings.Contains(err.Error(), "host=") {
-		t.Fatalf("Append(while live owner holds lock) error = %v, want actionable owner contention", err)
+	if !errors.Is(err, ErrConcurrentUpdate) || strings.Contains(err.Error(), "pid=") || strings.Contains(err.Error(), "host=") {
+		t.Fatalf("Append(while advisory lock is held) error = %v, want contention without an unproven owner claim", err)
+	}
+}
+
+func TestCompactStartLockAcquisitionIsBoundedAndCancellable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "review-store", "LOCK")
+	held, err := acquireStoreLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.release()
+
+	previousTimeout, previousPoll := compactStartLockTimeout, compactStartLockPollInterval
+	compactStartLockTimeout, compactStartLockPollInterval = 90*time.Millisecond, 25*time.Millisecond
+	defer func() {
+		compactStartLockTimeout, compactStartLockPollInterval = previousTimeout, previousPoll
+	}()
+	started := time.Now()
+	_, err = acquireCompactStartLock(context.Background(), path)
+	var timeout *AuthorityLockTimeoutError
+	if !errors.As(err, &timeout) || !errors.Is(err, ErrAuthorityLockTimeout) {
+		t.Fatalf("bounded START lock error = %T %v, want typed timeout", err, err)
+	}
+	if elapsed := time.Since(started); elapsed < 75*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Fatalf("bounded START lock elapsed = %s", elapsed)
+	}
+	if strings.Contains(err.Error(), "pid=") || strings.Contains(err.Error(), "host=") {
+		t.Fatalf("bounded START timeout claimed an unproven owner: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started = time.Now()
+	_, err = acquireCompactStartLock(ctx, path)
+	var cancelled *AuthorityLockCancelledError
+	if !errors.As(err, &cancelled) || !errors.Is(err, ErrAuthorityLockCancelled) {
+		t.Fatalf("cancelled START lock error = %T %v, want typed cancellation", err, err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("cancelled START lock waited %s", elapsed)
+	}
+}
+
+func TestCompactStartLockDefaultsMatchPublicBound(t *testing.T) {
+	if compactStartLockTimeout != 2*time.Second || compactStartLockPollInterval != 25*time.Millisecond {
+		t.Fatalf("START lock defaults = timeout %s poll %s", compactStartLockTimeout, compactStartLockPollInterval)
+	}
+}
+
+func TestCancelledCompactStartDoesNotCreateLockInode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "review-store", "LOCK")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := acquireCompactStartLock(ctx, path); !errors.Is(err, ErrAuthorityLockCancelled) {
+		t.Fatalf("cancelled free START = %v, want ErrAuthorityLockCancelled", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("cancelled START created LOCK: %v", err)
 	}
 }
 

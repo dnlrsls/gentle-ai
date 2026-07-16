@@ -54,6 +54,94 @@ func TestClassifyRiskUsesDeterministicFirstMatch(t *testing.T) {
 	}
 }
 
+func TestLowRiskReviewPathPolicyUsesCanonicalPOSIXOperationalBoundaries(t *testing.T) {
+	tests := []struct {
+		name string
+		stat DiffStat
+		want bool
+	}{
+		{name: "ordinary Markdown", stat: DiffStat{Path: "docs/guide.md", Additions: 1, NewMode: "100644"}, want: true},
+		{name: "active SVG", stat: DiffStat{Path: "docs/diagram.svg", Additions: 1, NewMode: "100644"}},
+		{name: "AGENTS instructions", stat: DiffStat{Path: "AGENTS.md", Additions: 1, NewMode: "100644"}},
+		{name: "nested CLAUDE instructions", stat: DiffStat{Path: "docs/CLAUDE.md", Additions: 1, NewMode: "100644"}},
+		{name: "GEMINI instructions", stat: DiffStat{Path: "GEMINI.md", Additions: 1, NewMode: "100644"}},
+		{name: "KIMI instructions", stat: DiffStat{Path: "KIMI.md", Additions: 1, NewMode: "100644"}},
+		{name: "SKILL instructions", stat: DiffStat{Path: "skills/go/SKILL.md", Additions: 1, NewMode: "100644"}},
+		{name: "copilot instructions", stat: DiffStat{Path: ".github/copilot-instructions.md", Additions: 1, NewMode: "100644"}},
+		{name: "agent name", stat: DiffStat{Path: "docs/review-agent.md", Additions: 1, NewMode: "100644"}},
+		{name: "skill path", stat: DiffStat{Path: "skills/review/guide.md", Additions: 1, NewMode: "100644"}},
+		{name: "prompt path", stat: DiffStat{Path: "prompts/review.md", Additions: 1, NewMode: "100644"}},
+		{name: "instruction name", stat: DiffStat{Path: "docs/review-instructions.md", Additions: 1, NewMode: "100644"}},
+		{name: "orchestrator name", stat: DiffStat{Path: "docs/review-orchestrator.md", Additions: 1, NewMode: "100644"}},
+		{name: "workflow path", stat: DiffStat{Path: "workflows/release.md", Additions: 1, NewMode: "100644"}},
+		{name: "dot agent", stat: DiffStat{Path: ".agent/rules.md", Additions: 1, NewMode: "100644"}},
+		{name: "dot agents", stat: DiffStat{Path: ".agents/reviewer.md", Additions: 1, NewMode: "100644"}},
+		{name: "dot codex", stat: DiffStat{Path: ".codex/instructions.md", Additions: 1, NewMode: "100644"}},
+		{name: "dot cursor", stat: DiffStat{Path: ".cursor/rules.md", Additions: 1, NewMode: "100644"}},
+		{name: "Claude command", stat: DiffStat{Path: ".claude/commands/deploy.md", Additions: 1, NewMode: "100644"}},
+		{name: "dot opencode", stat: DiffStat{Path: ".opencode/agents.md", Additions: 1, NewMode: "100644"}},
+		{name: "GitHub agents", stat: DiffStat{Path: ".github/agents/reviewer.md", Additions: 1, NewMode: "100644"}},
+		{name: "Windsurf workflows", stat: DiffStat{Path: ".windsurf/workflows/release.md", Additions: 1, NewMode: "100644"}},
+		{name: "internal runtime", stat: DiffStat{Path: "internal/runtime/prompt.md", Additions: 1, NewMode: "100644"}},
+		{name: "internal assets", stat: DiffStat{Path: "internal/assets/agent.md", Additions: 1, NewMode: "100644"}},
+		{name: "internal templates", stat: DiffStat{Path: "internal/templates/review.md", Additions: 1, NewMode: "100644"}},
+		{name: "runtime policy", stat: DiffStat{Path: "runtime/policy.md", Additions: 1, NewMode: "100644"}},
+		{name: "OpenSpec", stat: DiffStat{Path: "openspec/changes/example/proposal.md", Additions: 1, NewMode: "100644"}},
+		{name: "MDX", stat: DiffStat{Path: "docs/guide.mdx", Additions: 1, NewMode: "100644"}},
+		{name: "source comment", stat: DiffStat{Path: "internal/view.go", Additions: 1, NewMode: "100644"}},
+		{name: "binary Markdown", stat: DiffStat{Path: "docs/guide.md", Binary: true, NewMode: "100644"}},
+		{name: "symlink Markdown", stat: DiffStat{Path: "docs/guide.md", Additions: 1, NewMode: "120000"}},
+		{name: "gitlink Markdown", stat: DiffStat{Path: "docs/guide.md", Additions: 1, NewMode: "160000"}},
+		{name: "executable Markdown", stat: DiffStat{Path: "docs/guide.md", Additions: 1, NewMode: "100755"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isLowRiskNonExecutableStat(tt.stat); got != tt.want {
+				t.Fatalf("isLowRiskNonExecutableStat(%#v) = %t, want %t", tt.stat, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClassifyRiskPreservesFourHundredLineBoundary(t *testing.T) {
+	for _, tt := range []struct {
+		lines int
+		want  RiskLevel
+	}{{lines: 400, want: RiskLow}, {lines: 401, want: RiskHigh}} {
+		got, err := ClassifyRisk(RiskInput{
+			Stats:                    []DiffStat{{Path: "docs/ordinary-guide.md", Additions: tt.lines}},
+			OnlyNonExecutableChanges: true,
+		})
+		if err != nil || got != tt.want {
+			t.Fatalf("ClassifyRisk(%d Markdown lines) = %q, %v; want %q", tt.lines, got, err, tt.want)
+		}
+	}
+}
+
+func TestFallbackRiskReasonUsesTheSameLowRiskStatPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		stat DiffStat
+		want RiskReasonCode
+	}{
+		{name: "ordinary Markdown", stat: DiffStat{Path: "docs/guide.md", Additions: 1, NewMode: "100644"}, want: RiskReasonNonExecutableOnly},
+		{name: "active SVG", stat: DiffStat{Path: "docs/diagram.svg", Additions: 1, NewMode: "100644"}, want: RiskReasonExecutableChange},
+		{name: "binary Markdown", stat: DiffStat{Path: "docs/guide.md", Binary: true, NewMode: "100644"}, want: RiskReasonExecutableChange},
+		{name: "mode-only Markdown", stat: DiffStat{Path: "docs/guide.md", ModeOnly: true, OldMode: "100644", NewMode: "100644"}, want: RiskReasonExecutableChange},
+		{name: "operational Markdown", stat: DiffStat{Path: "AGENTS.md", Additions: 1, NewMode: "100644"}, want: RiskReasonExecutableChange},
+		{name: "Claude command", stat: DiffStat{Path: ".claude/commands/deploy.md", Additions: 1, NewMode: "100644"}, want: RiskReasonExecutableChange},
+		{name: "runtime policy", stat: DiffStat{Path: "runtime/policy.md", Additions: 1, NewMode: "100644"}, want: RiskReasonExecutableChange},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reasons := deriveSnapshotRiskReasons([]DiffStat{tt.stat}, tt.stat.Additions+tt.stat.Deletions)
+			if len(reasons) != 1 || reasons[0].Code != tt.want {
+				t.Fatalf("risk reasons = %#v, want %q", reasons, tt.want)
+			}
+		})
+	}
+}
+
 func TestCountChangedLinesHasOneCrossAdapterRule(t *testing.T) {
 	stats := []DiffStat{
 		{Path: "generated/client.go", Additions: 250, Deletions: 50, Generated: true},

@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gentleman-programming/gentle-ai/internal/reviewtransaction"
 )
@@ -119,6 +121,368 @@ func TestNegotiatedReviewFailuresPreserveRequestedLineage(t *testing.T) {
 	}
 }
 
+func TestNegotiatedFailureLineageUsesCanonicalFlagParsing(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation string
+		args      []string
+		want      string
+	}{
+		{name: "equals", operation: ReviewIntegrationOperationFinalize, args: []string{"--lineage=review-equals"}, want: "review-equals"},
+		{name: "split", operation: ReviewIntegrationOperationFinalize, args: []string{"--lineage", "review-split"}, want: "review-split"},
+		{name: "boolean before lineage", operation: ReviewIntegrationOperationFinalize, args: []string{"--failed", "--lineage", "review-after-boolean"}, want: "review-after-boolean"},
+		{name: "other flag owns lineage-shaped value", operation: ReviewIntegrationOperationFinalize, args: []string{"--cwd", "--lineage=not-a-lineage"}},
+		{name: "double dash stops parsing", operation: ReviewIntegrationOperationFinalize, args: []string{"--", "--lineage=review-after-stop"}},
+		{name: "positional stops parsing", operation: ReviewIntegrationOperationFinalize, args: []string{"unexpected", "--lineage=review-after-positional"}},
+		{name: "duplicate last wins", operation: ReviewIntegrationOperationFinalize, args: []string{"--lineage", "review-first", "--lineage=review-second"}, want: "review-second"},
+		{name: "duplicate malformed last clears", operation: ReviewIntegrationOperationFinalize, args: []string{"--lineage", "review-first", "--lineage=-invalid"}},
+		{name: "unknown flag fails closed", operation: ReviewIntegrationOperationFinalize, args: []string{"--unknown", "value", "--lineage", "review-hidden"}},
+		{name: "over maximum length", operation: ReviewIntegrationOperationFinalize, args: []string{"--lineage", "r" + strings.Repeat("a", 128)}},
+		{name: "start boolean before lineage", operation: "review.start", args: []string{"--committed-only", "--lineage", "review-start"}, want: "review-start"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failure := newReviewIntegrationFailure(tt.operation, tt.args, errors.New("transport interrupted"))
+			if failure.LineageID != tt.want {
+				t.Fatalf("lineage_id = %q, want %q", failure.LineageID, tt.want)
+			}
+		})
+	}
+}
+
+func TestNegotiatedStartLockFailuresAreTypedNonRetryableAndPreMutation(t *testing.T) {
+	lineage := "review-lock-boundary"
+	for _, tt := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "timeout", err: &reviewtransaction.AuthorityLockTimeoutError{}, code: "authority_lock_timeout"},
+		{name: "cancelled", err: &reviewtransaction.AuthorityLockCancelledError{}, code: "authority_lock_cancelled"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			failure := newReviewIntegrationFailure("review.start", []string{"--lineage", lineage}, tt.err)
+			if failure.Code != tt.code || failure.Phase != "pre_native" || failure.MutationOutcome != ReviewMutationNotStarted ||
+				failure.RetrySafe || failure.Replayability != reviewtransaction.ReplayabilityManualActionRequired ||
+				failure.NextAction != "stop" || failure.LineageID != lineage {
+				t.Fatalf("lock failure = %#v", failure)
+			}
+			if err := failure.Validate(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestNegotiatedFacadeAggregateTimeoutPreservesMutationTruth(t *testing.T) {
+	originalRunner := reviewFacadeCommandRunner
+	originalTimeout := reviewFacadeOperationTimeout
+	t.Cleanup(func() {
+		reviewFacadeCommandRunner = originalRunner
+		reviewFacadeOperationTimeout = originalTimeout
+	})
+	reviewFacadeOperationTimeout = 25 * time.Millisecond
+	for _, tt := range []struct {
+		name          string
+		args          []string
+		phase         string
+		mutation      ReviewMutationOutcome
+		replayability reviewtransaction.Replayability
+		nextAction    string
+		lineage       string
+	}{
+		{
+			name: "read only", args: []string{"status", "--contract", ReviewIntegrationContractV1},
+			phase: "pre_native", mutation: ReviewMutationNotStarted,
+			replayability: reviewtransaction.ReplayabilityManualActionRequired, nextAction: "stop",
+		},
+		{
+			name: "mutating", args: []string{"finalize", "--contract", ReviewIntegrationContractV1, "--lineage", "review-timeout"},
+			phase: "native_running", mutation: ReviewMutationUnknown,
+			replayability: reviewtransaction.ReplayabilityStatusRequired, nextAction: "review.status", lineage: "review-timeout",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reviewFacadeCommandRunner = func(context.Context, []string, io.Writer) error { time.Sleep(100 * time.Millisecond); return nil }
+			started := time.Now()
+			var output bytes.Buffer
+			err := RunReview(tt.args, &output)
+			if elapsed := time.Since(started); elapsed > 75*time.Millisecond {
+				t.Fatalf("aggregate facade timeout took %s", elapsed)
+			}
+			if err == nil {
+				t.Fatal("timed out operation succeeded")
+			}
+			failure := decodeReviewIntegrationFailure(t, output.Bytes())
+			if failure.Code != "operation_timeout" || failure.Phase != tt.phase || failure.MutationOutcome != tt.mutation ||
+				failure.RetrySafe || failure.Replayability != tt.replayability || failure.NextAction != tt.nextAction || failure.LineageID != tt.lineage {
+				t.Fatalf("timeout failure = %#v", failure)
+			}
+		})
+	}
+}
+
+func TestNegotiatedBindSDDTimeoutWaitsForPublicationCompletion(t *testing.T) {
+	originalRunner, originalTimeout := reviewFacadeCommandRunner, reviewFacadeOperationTimeout
+	t.Cleanup(func() { reviewFacadeCommandRunner, reviewFacadeOperationTimeout = originalRunner, originalTimeout })
+	reviewFacadeOperationTimeout = 10 * time.Millisecond
+	blocked, release := make(chan struct{}), make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	reviewFacadeCommandRunner = func(ctx context.Context, _ []string, stdout io.Writer) error {
+		<-ctx.Done()
+		close(blocked)
+		<-release
+		_, err := io.WriteString(stdout, "binding published\n")
+		return err
+	}
+	var output bytes.Buffer
+	completed := make(chan error, 1)
+	go func() {
+		completed <- RunReview([]string{"bind-sdd", "--contract", ReviewIntegrationContractV1}, &output)
+	}()
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatal("BIND-SDD worker did not observe timeout")
+	}
+	select {
+	case err := <-completed:
+		t.Fatalf("BIND-SDD returned before publication completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	released = true
+	select {
+	case err := <-completed:
+		if err != nil || output.String() != "binding published\n" {
+			t.Fatalf("BIND-SDD completion = %v, %q", err, output.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("BIND-SDD did not return after publication completed")
+	}
+}
+
+func TestNegotiatedBindSDDTimeoutBeforePublicationIsRetryable(t *testing.T) {
+	originalRunner, originalTimeout := reviewFacadeCommandRunner, reviewFacadeOperationTimeout
+	t.Cleanup(func() { reviewFacadeCommandRunner, reviewFacadeOperationTimeout = originalRunner, originalTimeout })
+	reviewFacadeOperationTimeout = 10 * time.Millisecond
+	reviewFacadeCommandRunner = func(ctx context.Context, _ []string, _ io.Writer) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	var output bytes.Buffer
+	err := RunReview([]string{"bind-sdd", "--contract", ReviewIntegrationContractV1, "--lineage", "review-bind-timeout"}, &output)
+	if err == nil {
+		t.Fatal("timed out BIND-SDD succeeded")
+	}
+	failure := decodeReviewIntegrationFailure(t, output.Bytes())
+	if failure.Operation != ReviewIntegrationOperationBindSDD || failure.Code != "operation_timeout" || failure.Phase != "pre_native" ||
+		failure.MutationOutcome != ReviewMutationNotStarted || !failure.RetrySafe || failure.Replayability != reviewtransaction.ReplayabilityNotReplayable ||
+		failure.NextAction != "retry" || failure.LineageID != "review-bind-timeout" {
+		t.Fatalf("BIND-SDD timeout failure = %#v", failure)
+	}
+}
+
+func TestNegotiatedGitFailuresAreTypedNonAmplifyingAndPreMutation(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "timeout", err: &reviewtransaction.GitCommandTimeoutError{Timeout: 15 * time.Second}, code: "git_command_timeout"},
+		{name: "exit", err: &reviewtransaction.GitCommandError{ExitCode: 128}, code: "git_command_failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			failure := newReviewIntegrationFailure("review.start", []string{"--lineage", "review-git-boundary"}, tt.err)
+			if failure.Code != tt.code || failure.Phase != "pre_native" || failure.MutationOutcome != ReviewMutationNotStarted ||
+				failure.RetrySafe || failure.Replayability != reviewtransaction.ReplayabilityManualActionRequired || failure.NextAction != "stop" {
+				t.Fatalf("git failure = %#v", failure)
+			}
+		})
+	}
+}
+
+func TestNegotiatedFinalizePostTransitionGitTimeoutRequiresStatus(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("base\none\ntwo\nthree\nfour\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	started := startFacadeReview(t, repo)
+	if len(started.SelectedLenses) != 1 {
+		t.Fatalf("post-transition fixture lenses = %v", started.SelectedLenses)
+	}
+	store, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, started.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resultPath := filepath.Join(t.TempDir(), "reviewer.json")
+	writeReviewCLIJSON(t, resultPath, facadeReviewerResult{
+		Lens: started.SelectedLenses[0],
+		Findings: []facadeFinding{{
+			Location: "tracked.txt:5", Severity: "CRITICAL", Claim: "candidate returns the wrong terminal value",
+			ProofRefs:     []string{"differential test passes on base and fails on candidate"},
+			EvidenceClass: reviewtransaction.EvidenceDeterministic, CausalDisposition: reviewtransaction.CausalIntroduced,
+		}},
+		Evidence: []string{"focused differential test failed on candidate"},
+	})
+	validationPath := filepath.Join(t.TempDir(), "validation.json")
+	writeReviewCLIJSON(t, validationPath, facadeValidationResult{
+		OriginalCriteria:     facadeValidationCheck{Passed: true, Evidence: []string{"original acceptance test passed"}},
+		CorrectionRegression: facadeValidationCheck{Passed: true, Evidence: []string{"targeted regression test passed"}},
+		FollowUps:            []reviewtransaction.FollowUp{},
+	})
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperDir := t.TempDir()
+	helperPath := filepath.Join(helperDir, filepath.Base(realGit))
+	copyReviewGitHelperExecutable(t, helperPath)
+	oldPath := os.Getenv("PATH")
+	t.Setenv(reviewGitHelperModeEnv, "1")
+	t.Setenv(reviewGitHelperRealGitEnv, realGit)
+	t.Setenv(reviewGitHelperStatePathEnv, store.StatePath())
+	t.Cleanup(func() { _ = os.Setenv("PATH", oldPath) })
+	oldTimeout := reviewFacadeOperationTimeout
+	reviewFacadeOperationTimeout = time.Second
+	t.Cleanup(func() { reviewFacadeOperationTimeout = oldTimeout })
+	oldTransitionHook := reviewFacadeCommittedTransitionHook
+	reviewFacadeCommittedTransitionHook = func(ctx context.Context, hookRepo, operation, _ string) error {
+		if operation != "review/begin-fix" {
+			return nil
+		}
+		if err := os.Setenv("PATH", helperDir+string(os.PathListSeparator)+oldPath); err != nil {
+			return err
+		}
+		defer func() { _ = os.Setenv("PATH", oldPath) }()
+		_, err := (reviewtransaction.SnapshotBuilder{Repo: hookRepo}).HasDirtyTrackedChanges(ctx)
+		return err
+	}
+	t.Cleanup(func() { reviewFacadeCommittedTransitionHook = oldTransitionHook })
+
+	tracePath := filepath.Join(t.TempDir(), "finalize-trace.jsonl")
+	args := []string{
+		"finalize", "--contract", ReviewIntegrationContractV1, "--cwd", repo, "--lineage", started.LineageID,
+		"--result", resultPath, "--correction-lines", "2", "--validation", validationPath, "--trace", tracePath,
+	}
+	var output bytes.Buffer
+	if err := RunReview(args, &output); err == nil {
+		t.Fatal("post-transition Git stall succeeded")
+	}
+	failure := decodeReviewIntegrationFailure(t, output.Bytes())
+	if failure.Code != "git_command_timeout" || failure.Phase != "native_committed" || failure.MutationOutcome != ReviewMutationUnknown ||
+		failure.AuthorityApplicability != "current_target" || failure.RetrySafe || failure.Replayability != reviewtransaction.ReplayabilityStatusRequired ||
+		failure.NextAction != "review.status" || failure.LineageID != started.LineageID {
+		t.Fatalf("post-transition Git timeout failure = %#v", failure)
+	}
+	committed, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed.Revision == initial.Revision || committed.State.State != reviewtransaction.StateCorrectionRequired ||
+		committed.State.ProposedCorrectionLines == nil || *committed.State.ProposedCorrectionLines != 2 ||
+		committed.State.CorrectionBudget != initial.State.CorrectionBudget || len(committed.State.CorrectionAttempts) != 0 {
+		t.Fatalf("post-transition authority = %#v", committed)
+	}
+	traceBeforeReplay, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(traceBeforeReplay), `"operation":"review/complete-review"`) != 1 ||
+		strings.Count(string(traceBeforeReplay), `"operation":"review/begin-fix"`) != 1 {
+		t.Fatalf("post-transition trace = %s", traceBeforeReplay)
+	}
+
+	if err := os.Setenv("PATH", oldPath); err != nil {
+		t.Fatal(err)
+	}
+	reviewFacadeOperationTimeout = oldTimeout
+	reviewFacadeCommittedTransitionHook = oldTransitionHook
+	output.Reset()
+	if err := RunReview([]string{
+		"status", "--contract", ReviewIntegrationContractV1, "--cwd", repo, "--lineage", started.LineageID,
+	}, &output); err != nil {
+		t.Fatalf("status after post-transition timeout: %v\n%s", err, output.String())
+	}
+	var status ReviewTargetStatusResult
+	decodeStrictReviewJSON(t, output.Bytes(), &status)
+	if status.Applicability != reviewtransaction.TargetApplicabilityCurrent || status.Authority == nil ||
+		status.Authority.LineageID != started.LineageID || status.Authority.State != reviewtransaction.StateCorrectionRequired ||
+		status.Frozen == nil || status.Frozen.CorrectionBudget != initial.State.CorrectionBudget {
+		t.Fatalf("status after post-transition timeout = %#v", status)
+	}
+
+	output.Reset()
+	_ = RunReview(args, &output)
+	replayed, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Revision != committed.Revision || replayed.State.CorrectionBudget != committed.State.CorrectionBudget ||
+		replayed.State.ProposedCorrectionLines == nil || *replayed.State.ProposedCorrectionLines != 2 || len(replayed.State.CorrectionAttempts) != 0 {
+		t.Fatalf("exact replay changed the committed correction budget: before=%#v after=%#v", committed, replayed)
+	}
+	traceAfterReplay, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(traceAfterReplay, traceBeforeReplay) {
+		t.Fatalf("exact replay duplicated a committed transition: before=%s after=%s", traceBeforeReplay, traceAfterReplay)
+	}
+}
+
+const (
+	reviewGitHelperModeEnv      = "GENTLE_AI_REVIEW_GIT_HELPER"
+	reviewGitHelperRealGitEnv   = "GENTLE_AI_REVIEW_GIT_HELPER_REAL"
+	reviewGitHelperStatePathEnv = "GENTLE_AI_REVIEW_GIT_HELPER_STATE"
+)
+
+func reviewGitProcessHelperExitCode() (int, bool) {
+	if os.Getenv(reviewGitHelperModeEnv) != "1" {
+		return 0, false
+	}
+	if payload, err := os.ReadFile(os.Getenv(reviewGitHelperStatePathEnv)); err == nil && strings.Contains(string(payload), `"proposed_correction_lines":`) {
+		time.Sleep(10 * time.Second)
+		return 0, true
+	}
+	command := exec.Command(os.Getenv(reviewGitHelperRealGitEnv), os.Args[1:]...)
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := command.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode(), true
+		}
+		return 1, true
+	}
+	return 0, true
+}
+
+func copyReviewGitHelperExecutable(t *testing.T, destination string) {
+	t.Helper()
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, payload, 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNegotiatedLegacyReadOnlyFailurePreservesTypedCauseAcrossMutationRoutes(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -159,6 +523,7 @@ func TestNegotiatedGateDenialUsesFailureEnvelopeWithoutAuthorityDrift(t *testing
 	writeNegotiatedOperationChange(t, repo, "thin")
 	lineage := "review-failure-gate"
 	_, store := finalizeNegotiatedOperationFixture(t, repo, lineage, true)
+	var err error
 	beforeAuthority := readReviewOperationFile(t, store.StatePath())
 	beforeReceipt := readReviewOperationFile(t, store.ReceiptPath())
 	if err := os.WriteFile(filepath.Join(repo, "openspec", "changes", "thin", "proposal.md"), []byte("# Drifted proposal\n"), 0o644); err != nil {
@@ -166,7 +531,7 @@ func TestNegotiatedGateDenialUsesFailureEnvelopeWithoutAuthorityDrift(t *testing
 	}
 
 	var output bytes.Buffer
-	err := RunReview([]string{
+	err = RunReview([]string{
 		"validate", "--contract", ReviewIntegrationContractV1, "--cwd", repo, "--lineage", lineage,
 		"--gate", string(reviewtransaction.GatePostApply),
 	}, &output)
@@ -175,10 +540,11 @@ func TestNegotiatedGateDenialUsesFailureEnvelopeWithoutAuthorityDrift(t *testing
 	}
 	failure := decodeReviewIntegrationFailure(t, output.Bytes())
 	if failure.Code != "gate_scope_changed" || failure.MutationOutcome != ReviewMutationNotStarted ||
-		!failure.RetrySafe || failure.Replayability != reviewtransaction.ReplayabilityManualActionRequired ||
+		failure.RetrySafe || failure.Replayability != reviewtransaction.ReplayabilityManualActionRequired ||
 		failure.NextAction != "explicit-maintainer-action" {
 		t.Fatalf("gate failure = %#v", failure)
 	}
+	assertScopeChangeRecovery(t, failure, lineage, "openspec/changes/thin/proposal.md")
 	if !bytes.Equal(beforeAuthority, readReviewOperationFile(t, store.StatePath())) ||
 		!bytes.Equal(beforeReceipt, readReviewOperationFile(t, store.ReceiptPath())) {
 		t.Fatal("negotiated gate denial changed authority or receipt bytes")
@@ -193,7 +559,8 @@ func TestNegotiatedReceiptPublicationFailureIsSanitizedAndExactlyReplayable(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RunReviewFacadeFinalize([]string{"--cwd", repo, "--lineage", started.LineageID}, io.Discard); err != nil {
+	finalizeArgs := append([]string{"--cwd", repo, "--lineage", started.LineageID}, facadeReviewerResultArgs(t, started)...)
+	if err := RunReviewFacadeFinalize(finalizeArgs, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	evidence := filepath.Join(t.TempDir(), "evidence.txt")
@@ -269,7 +636,7 @@ func TestReviewIntegrationFailureSchemaAndFixtureAreStrict(t *testing.T) {
 		t.Fatal(err)
 	}
 	failure := decodeReviewIntegrationFailure(t, fixture)
-	if failure.Code != "receipt_publication_pending" {
+	if failure.Code != "gate_scope_changed" || failure.Context == nil || failure.Context.ScopeChange == nil {
 		t.Fatalf("failure fixture = %#v", failure)
 	}
 	var raw map[string]any
