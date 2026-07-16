@@ -324,6 +324,39 @@ func TestCompactFixDiffRejectsInexactCorrectionBinding(t *testing.T) {
 	}
 }
 
+func TestCompactCorrectedBaseDiffPrePushAllowsOnlyExactSquashedFullDelivery(t *testing.T) {
+	tests := []struct {
+		name      string
+		extraPath bool
+		wrongBase bool
+		wantAllow bool
+	}{
+		{name: "exact genesis delivery", wantAllow: true},
+		{name: "extra path", extraPath: true},
+		{name: "wrong base", wrongBase: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, state, receipt, baseRef := approvedCompactSquashedFixDiffFixture(t, "compact-squashed-"+strings.ReplaceAll(tt.name, " ", "-"), tt.extraPath, tt.wrongBase)
+			input := NativeGateRequestInput{Gate: GatePrePush, LineageID: state.LineageID, BaseRef: baseRef}
+			assessment, err := AssessCompactGateTarget(context.Background(), repo, state, input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := EvaluateCompactGate(context.Background(), repo, receipt, input)
+			if tt.wantAllow && (got.Result != GateAllow || !got.Context.BaseRelationshipValid || got.Context.BaseTree != state.InitialSnapshot.BaseTree || got.Context.CandidateTree != receipt.FinalCandidateTree) {
+				t.Fatalf("exact squashed full delivery = %#v", got)
+			}
+			if tt.wantAllow && assessment.Applicability != CompactGateTargetExact {
+				t.Fatalf("exact squashed full delivery assessment = %#v", assessment)
+			}
+			if !tt.wantAllow && (got.Result == GateAllow || assessment.Applicability == CompactGateTargetExact) {
+				t.Fatalf("inexact squashed full delivery = %#v", got)
+			}
+		})
+	}
+}
+
 func TestCompactPreCommitGateRejectsInexactStagedIntendedTransitions(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -839,6 +872,10 @@ func persistCorrectedCompactFixture(t *testing.T, repo string, state CompactStat
 }
 
 func approvedCompactFixDiffFixture(t *testing.T, lineage string) (string, CompactState, CompactReceipt, string) {
+	return approvedCompactFixDiffFixtureWithCorrection(t, lineage, "base other\n")
+}
+
+func approvedCompactFixDiffFixtureWithCorrection(t *testing.T, lineage, correction string) (string, CompactState, CompactReceipt, string) {
 	t.Helper()
 	repo := initSnapshotRepo(t)
 	writeSnapshotFile(t, repo, "other.txt", "base other\n")
@@ -872,7 +909,7 @@ func approvedCompactFixDiffFixture(t *testing.T, lineage string) (string, Compac
 	configurePublicationRemote(t, repo, branch)
 	gitSnapshot(t, repo, "config", "branch."+branch+".remote", "origin")
 	gitSnapshot(t, repo, "config", "branch."+branch+".merge", "refs/heads/"+branch)
-	writeSnapshotFile(t, repo, "other.txt", "base other\n")
+	writeSnapshotFile(t, repo, "other.txt", correction)
 	fix, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), Target{
 		Kind: TargetFixDiff, BaseRef: state.InitialSnapshot.CandidateTree,
 		IntendedUntracked: []string{}, LedgerIDs: state.FixFindingIDs,
@@ -914,6 +951,26 @@ func approvedCompactFixDiffFixture(t *testing.T, lineage string) (string, Compac
 		t.Fatal(err)
 	}
 	return repo, state, receipt, "origin/" + branch
+}
+
+func approvedCompactSquashedFixDiffFixture(t *testing.T, lineage string, extraPath, wrongBase bool) (string, CompactState, CompactReceipt, string) {
+	t.Helper()
+	repo, state, receipt, baseRef := approvedCompactFixDiffFixtureWithCorrection(t, lineage, "corrected other\n")
+	baseCommit := strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD^"))
+	if extraPath {
+		writeSnapshotFile(t, repo, "extra.go", "package extra\n")
+	}
+	gitSnapshot(t, repo, "add", "-A")
+	finalTree := strings.TrimSpace(gitSnapshot(t, repo, "write-tree"))
+	publicationBase := baseCommit
+	if wrongBase {
+		publicationBase = strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", baseCommit+"^"))
+	}
+	finalCommit := strings.TrimSpace(gitSnapshot(t, repo, "commit-tree", finalTree, "-p", publicationBase, "-m", "squashed full delivery"))
+	gitSnapshot(t, repo, "update-ref", "HEAD", finalCommit)
+	remote := strings.TrimSpace(gitSnapshot(t, repo, "remote", "get-url", "origin"))
+	gitSnapshot(t, repo, "--git-dir", remote, "update-ref", "refs/heads/"+strings.TrimPrefix(baseRef, "origin/"), publicationBase)
+	return repo, state, receipt, baseRef
 }
 
 func approvedCompactSubsetDeliveryFixture(t *testing.T, lineage string) (string, CompactState, CompactReceipt, string) {

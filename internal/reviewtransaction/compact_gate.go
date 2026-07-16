@@ -63,18 +63,19 @@ func AssessCompactGateTarget(ctx context.Context, repo string, state CompactStat
 		assessment.Applicability = CompactGateTargetScopeChanged
 		return assessment, nil
 	}
-	snapshot, _, err := buildCompactLifecycleSnapshot(ctx, repo, request)
+	snapshot, resolvedPrePR, err := buildCompactLifecycleSnapshot(ctx, repo, request)
 	if err != nil {
 		return assessment, fmt.Errorf("build compact gate target: %w", err)
 	}
 	assessment.Actual = snapshot
+	squashedFixDelivery := compactSquashedFixDelivery(request.Gate, state, snapshot, resolvedPrePR, state.CurrentSnapshot.CandidateTree)
 	strictBinding := request.Gate == GatePostApply || request.Gate == GatePreCommit ||
 		request.Gate == GatePrePush && state.InitialSnapshot.Kind != TargetCurrentChanges
 	pathsMatch := pathsAreSubset(snapshot.Paths, state.GenesisPaths) == nil
 	baseMatches := snapshot.BaseTree == state.CurrentSnapshot.BaseTree || request.Target.Kind == TargetFixDiff
 	if strictBinding {
-		pathsMatch = snapshot.PathsDigest == state.CurrentSnapshot.PathsDigest
-		baseMatches = snapshot.BaseTree == state.CurrentSnapshot.BaseTree
+		pathsMatch = snapshot.PathsDigest == state.CurrentSnapshot.PathsDigest || squashedFixDelivery
+		baseMatches = snapshot.BaseTree == state.CurrentSnapshot.BaseTree || squashedFixDelivery
 	}
 	if request.Gate == GatePrePR {
 		// A base advance is authorized only by the later evidence-bearing gate
@@ -106,6 +107,12 @@ func hasAnyReviewPath(left, right []string) bool {
 		}
 	}
 	return false
+}
+
+func compactSquashedFixDelivery(gate GateKind, state CompactState, snapshot Snapshot, refs *resolvedPrePRRefs, finalCandidateTree string) bool {
+	return gate == GatePrePush && state.CurrentSnapshot.Kind == TargetFixDiff && refs != nil && refs.DeliveredCommitCount == 1 &&
+		snapshot.CandidateTree == finalCandidateTree && snapshot.BaseTree == state.InitialSnapshot.BaseTree &&
+		equalStrings(snapshot.Paths, state.GenesisPaths) && snapshot.PathsDigest == digestPaths(state.GenesisPaths)
 }
 
 func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceipt, input NativeGateRequestInput) NativeGateEvaluation {
@@ -201,10 +208,11 @@ func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceip
 		}
 	}
 	binding := record.State.CurrentSnapshot
+	squashedFixDelivery := compactSquashedFixDelivery(request.Gate, record.State, snapshot, resolvedPrePR, receipt.FinalCandidateTree)
 	strictBinding := request.Gate == GatePostApply || request.Gate == GatePreCommit || request.Gate == GatePrePush && record.State.InitialSnapshot.Kind != TargetCurrentChanges
 	baseRelationshipValid := snapshot.BaseTree == receipt.BaseTree || request.Target.Kind == TargetFixDiff
 	if strictBinding {
-		baseRelationshipValid = snapshot.BaseTree == binding.BaseTree
+		baseRelationshipValid = snapshot.BaseTree == binding.BaseTree || squashedFixDelivery
 	}
 	gateContext := GateContext{
 		Gate: request.Gate, LineageID: receipt.LineageID, Generation: receipt.Generation,
@@ -220,7 +228,7 @@ func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceip
 	}
 	pathsMismatch := pathsAreSubset(snapshot.Paths, record.State.GenesisPaths) != nil && !compatibleAdvance
 	if strictBinding {
-		pathsMismatch = snapshot.PathsDigest != binding.PathsDigest
+		pathsMismatch = snapshot.PathsDigest != binding.PathsDigest && !squashedFixDelivery
 	}
 	if snapshot.CandidateTree != receipt.FinalCandidateTree || pathsMismatch {
 		gateContext.Denial = &GateDenial{Stage: "receipt-binding", Code: "candidate-or-paths-mismatch"}
@@ -234,7 +242,7 @@ func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceip
 	}
 	baseMismatch := snapshot.BaseTree != receipt.BaseTree && request.Target.Kind != TargetFixDiff && !compatibleAdvance
 	if strictBinding {
-		baseMismatch = snapshot.BaseTree != binding.BaseTree
+		baseMismatch = snapshot.BaseTree != binding.BaseTree && !squashedFixDelivery
 	}
 	if baseMismatch {
 		gateContext.Denial = &GateDenial{Stage: "receipt-binding", Code: "base-mismatch"}
