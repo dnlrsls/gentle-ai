@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/gentleman-programming/gentle-ai/internal/reviewtransaction"
@@ -302,6 +303,98 @@ func TestUnscopedGateDiscoveryFailsClosedOnMalformedUnrelatedInventory(t *testin
 	failure := decodeReviewIntegrationFailure(t, unscoped.Bytes())
 	if failure.Code != "authority_corrupted" || failure.AuthorityApplicability != "corrupted" || failure.RetrySafe || failure.NextAction != "stop" {
 		t.Fatalf("corrupted inventory failure = %#v", failure)
+	}
+}
+
+func TestUnqualifiedPrePRDiscoveryComposesExactSequentialCompactReceipts(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	branch := strings.TrimSpace(runReviewCLIGit(t, repo, "symbolic-ref", "--short", "HEAD"))
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runReviewCLIGit(t, repo, "clone", "--bare", repo, remote)
+	runReviewCLIGit(t, repo, "remote", "add", "origin", remote)
+
+	lineages := []string{"review-chain-first", "review-chain-second", "review-chain-third"}
+	for index, lineage := range lineages {
+		approveDiscoveryMarkdown(t, repo, lineage, "docs/segment-"+string(rune('a'+index))+".md", "reviewed\n")
+		runReviewCLIGit(t, repo, "add", "-A")
+		runReviewCLIGit(t, repo, "commit", "-qm", "deliver "+lineage)
+	}
+
+	var output bytes.Buffer
+	if err := RunReview([]string{
+		"validate", "--contract", ReviewIntegrationContractV1, "--cwd", repo,
+		"--gate", string(reviewtransaction.GatePrePR), "--base-ref", "origin/" + branch,
+	}, &output); err != nil {
+		t.Fatalf("composed pre-PR facade validation: %v\n%s", err, output.String())
+	}
+	var result ReviewValidateResult
+	decodeStrictReviewJSON(t, decodeReviewOperationEnvelope(t, output.Bytes()).Result, &result)
+	if !result.Allowed || result.Context.LineageID != lineages[2] || result.Context.ChainIdentity == "" || result.Context.PrePRBoundary == nil {
+		t.Fatalf("composed pre-PR result = %#v", result)
+	}
+
+	output.Reset()
+	err := RunReview([]string{
+		"validate", "--contract", ReviewIntegrationContractV1, "--cwd", repo, "--lineage", lineages[2],
+		"--gate", string(reviewtransaction.GatePrePR), "--base-ref", "origin/" + branch,
+	}, &output)
+	if err == nil {
+		t.Fatal("explicit terminal lineage unexpectedly entered composition")
+	}
+}
+
+func TestUnqualifiedPrePRDiscoveryComposesSequentialReceiptsForSamePath(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	branch := strings.TrimSpace(runReviewCLIGit(t, repo, "symbolic-ref", "--short", "HEAD"))
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runReviewCLIGit(t, repo, "clone", "--bare", repo, remote)
+	runReviewCLIGit(t, repo, "remote", "add", "origin", remote)
+
+	for index, lineage := range []string{"review-chain-overlap-first", "review-chain-overlap-second", "review-chain-overlap-third"} {
+		approveDiscoveryMarkdown(t, repo, lineage, "docs/shared.md", "reviewed "+string(rune('a'+index))+"\n")
+		runReviewCLIGit(t, repo, "add", "-A")
+		runReviewCLIGit(t, repo, "commit", "-qm", "deliver "+lineage)
+	}
+
+	var output bytes.Buffer
+	if err := RunReview([]string{
+		"validate", "--contract", ReviewIntegrationContractV1, "--cwd", repo,
+		"--gate", string(reviewtransaction.GatePrePR), "--base-ref", "origin/" + branch,
+	}, &output); err != nil {
+		t.Fatalf("same-path composed pre-PR validation: %v\n%s", err, output.String())
+	}
+	var result ReviewValidateResult
+	decodeStrictReviewJSON(t, decodeReviewOperationEnvelope(t, output.Bytes()).Result, &result)
+	if !result.Allowed || result.Context.LineageID != "review-chain-overlap-third" {
+		t.Fatalf("same-path composed pre-PR result = %#v", result)
+	}
+}
+
+func TestUnqualifiedPrePRDiscoveryKeepsExactSingleReceiptContext(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	branch := strings.TrimSpace(runReviewCLIGit(t, repo, "symbolic-ref", "--short", "HEAD"))
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runReviewCLIGit(t, repo, "clone", "--bare", repo, remote)
+	runReviewCLIGit(t, repo, "remote", "add", "origin", remote)
+	started, store := approveDiscoveryMarkdown(t, repo, "review-single-pre-pr", "docs/single.md", "reviewed\n")
+	runReviewCLIGit(t, repo, "add", "-A")
+	runReviewCLIGit(t, repo, "commit", "-qm", "deliver exact single receipt")
+	record, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := RunReview([]string{
+		"validate", "--contract", ReviewIntegrationContractV1, "--cwd", repo,
+		"--gate", string(reviewtransaction.GatePrePR), "--base-ref", "origin/" + branch,
+	}, &output); err != nil {
+		t.Fatalf("exact single pre-PR validation: %v\n%s", err, output.String())
+	}
+	var result ReviewValidateResult
+	decodeStrictReviewJSON(t, decodeReviewOperationEnvelope(t, output.Bytes()).Result, &result)
+	if !result.Allowed || result.Context.LineageID != started.LineageID || result.Context.StoreRevision != record.Revision || result.Context.ChainIdentity != record.Revision {
+		t.Fatalf("exact single receipt context changed = %#v", result.Context)
 	}
 }
 

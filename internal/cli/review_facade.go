@@ -1043,7 +1043,20 @@ func runReviewFacadeValidate(ctx context.Context, args []string, stdout io.Write
 		input.LineageID = compactRecord.State.LineageID
 		input.IntendedUntracked = append([]string(nil), compactRecord.State.InitialSnapshot.IntendedUntracked...)
 		evaluation := reviewtransaction.EvaluateCompactGate(ctx, root, receipt, input)
+		if gateInput.Gate == reviewtransaction.GatePrePR && strings.TrimSpace(*lineage) == "" &&
+			evaluation.Context.Denial != nil && evaluation.Context.Denial.Stage == "receipt-binding" && evaluation.Context.Denial.Code == "base-mismatch" {
+			if composed, attempted := reviewtransaction.EvaluateCompactPrePRChain(ctx, root, gateInput); attempted {
+				return emitFacadeGateEvaluationNegotiated(stdout, composed, negotiated)
+			}
+		}
 		return emitFacadeGateEvaluationNegotiated(stdout, evaluation, negotiated)
+	}
+	var compactDiscovery *ReviewReceiptDiscoveryError
+	if gateInput.Gate == reviewtransaction.GatePrePR && strings.TrimSpace(*lineage) == "" &&
+		errors.As(compactErr, &compactDiscovery) && compactDiscovery.Kind != ReviewAuthorityCorrupted && compactDiscovery.Kind != ReviewReceiptMissing {
+		if evaluation, attempted := reviewtransaction.EvaluateCompactPrePRChain(ctx, root, gateInput); attempted {
+			return emitFacadeGateEvaluationNegotiated(stdout, evaluation, negotiated)
+		}
 	}
 	if !negotiated {
 		var discovery *ReviewReceiptDiscoveryError
