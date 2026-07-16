@@ -53,6 +53,10 @@ Consumers MUST NOT reconstruct receipts, derive canonical hashes, inspect the Gi
 
 `review.start` is the only ordinary entry point that creates a review budget. Finalize continues that frozen lifecycle. Status, validation, and gates are read-only and never allocate a reviewer, actor, lineage, or correction budget.
 
+Reviewer results may omit the top-level `lens`; when present, it must match the selected-lens position returned by start. Both the short names (`risk`, `resilience`, `readability`, `reliability`) and the negotiated facade names (`review-risk`, `review-resilience`, `review-readability`, `review-reliability`) map to the same native lenses. A mismatch is rejected before authority mutation instead of being overwritten.
+
+Proof and evidence strings accept ordinary technical notation, including `HEAD^{tree}`, `{}`, `<A>`, and `=>`. Blank values and exact non-evidence sentinels such as `n/a`, `none`, `todo`, `tbd`, `pass`, `passed`, `success`, and `placeholder` remain invalid.
+
 ### Validate exactly five gates
 
 | Gate | Required boundary |
@@ -104,6 +108,8 @@ Finalize commits terminal compact authority before publishing its derived receip
 
 An ambiguous or lost transport result is never proof of `not_started`. Reconcile it with `review.status`; do not launch another reviewer, correction, or lineage while the outcome is unknown.
 
+Malformed reviewer JSON, missing required reviewer arrays, canonicalization failures, and selected-lens mismatches are deterministic preflight failures. Negotiated finalize reports `invalid_request`, `mutation_outcome: not_started`, `retry_safe: true`, `replayability: not_replayable`, and `next_action: correct_request`, while preserving a valid requested lineage for target-scoped recovery. Correct the payload before retrying; do not run authority repair.
+
 ## Preserve compatibility without reopening legacy mutation
 
 Compact-v2 is the sole ordinary mutable authority. Legacy-v1 is in an active, release-based compatibility window with these guarantees:
@@ -115,6 +121,7 @@ Compact-v2 is the sole ordinary mutable authority. Legacy-v1 is in an active, re
 - Applicable approved legacy status validates the canonical published v1 receipt and reports its SHA-256 identity as `present`. Legacy-v1 never reports `publication_pending`; a missing, corrupt, or wrong legacy receipt fails closed as corrupted authority without compact exact-replay semantics.
 - Frozen tier, authored-line count, and correction budget are compact-v2 fields. Historical `ordinary_4r` legacy status omits `frozen` rather than inventing values; compact current targets still require the complete frozen object.
 - Unrelated valid legacy history does not block a current compact target.
+- An explicit valid compact lineage remains `current_target` when unrelated malformed legacy history exists. Unscoped inventory still fails closed and reports the malformed history; the provider does not quarantine or repair it automatically.
 - Same-lineage mixed v1/v2 authority and unclassifiable corruption fail closed.
 - Explicit maintenance transport import/export may preserve historical compatibility.
 - Removal is not scheduled and requires at least one compatibility release plus separate reachability evidence.

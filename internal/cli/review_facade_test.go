@@ -1084,8 +1084,12 @@ func TestReviewSchemaExamplesMatchStrictFacadeContracts(t *testing.T) {
 func TestReviewerSchemaRequiresRuntimeMandatoryFindingEvidence(t *testing.T) {
 	var schema struct {
 		Properties map[string]struct {
-			MinItems int `json:"minItems"`
+			MinItems int      `json:"minItems"`
+			Enum     []string `json:"enum"`
 			Items    struct {
+				Not struct {
+					Pattern string `json:"pattern"`
+				} `json:"not"`
 				Required []string `json:"required"`
 				AllOf    []struct {
 					Then struct {
@@ -1094,6 +1098,11 @@ func TestReviewerSchemaRequiresRuntimeMandatoryFindingEvidence(t *testing.T) {
 				} `json:"allOf"`
 				Properties map[string]struct {
 					MinItems int `json:"minItems"`
+					Items    struct {
+						Not struct {
+							Pattern string `json:"pattern"`
+						} `json:"not"`
+					} `json:"items"`
 				} `json:"properties"`
 			} `json:"items"`
 		} `json:"properties"`
@@ -1103,8 +1112,21 @@ func TestReviewerSchemaRequiresRuntimeMandatoryFindingEvidence(t *testing.T) {
 	}
 	wantRequired := []string{"location", "severity", "claim", "proof_refs"}
 	wantSevere := []string{"evidence_class", "causal_disposition"}
+	wantLenses := []string{
+		"risk", "resilience", "readability", "reliability",
+		reviewtransaction.LensRisk, reviewtransaction.LensResilience,
+		reviewtransaction.LensReadability, reviewtransaction.LensReliability,
+	}
 	if !reflect.DeepEqual(schema.Properties["findings"].Items.Required, wantRequired) || len(schema.Properties["findings"].Items.AllOf) != 1 || !reflect.DeepEqual(schema.Properties["findings"].Items.AllOf[0].Then.Required, wantSevere) || schema.Properties["evidence"].MinItems != 1 || schema.Properties["findings"].Items.Properties["proof_refs"].MinItems != 1 {
 		t.Fatalf("reviewer schema requirements = %#v", schema)
+	}
+	if !reflect.DeepEqual(schema.Properties["lens"].Enum, wantLenses) {
+		t.Fatalf("reviewer schema lens enum = %v, want %v", schema.Properties["lens"].Enum, wantLenses)
+	}
+	proofSentinels := schema.Properties["findings"].Items.Properties["proof_refs"].Items.Not.Pattern
+	evidenceSentinels := schema.Properties["evidence"].Items.Not.Pattern
+	if proofSentinels == "" || proofSentinels != evidenceSentinels {
+		t.Fatalf("reviewer schema sentinel parity = proof %q evidence %q", proofSentinels, evidenceSentinels)
 	}
 
 	for name, payload := range map[string]string{

@@ -100,14 +100,17 @@ func reviewIntegrationFailureRoute(args []string) (string, bool, *ReviewIntegrat
 	}
 	if missing {
 		failure := newReviewIntegrationPreflightFailure(operation, "invalid_request", "The negotiated review request is invalid.")
+		failure.LineageID = safeReviewIntegrationLineage(args[1:])
 		return operation, true, &failure
 	}
 	if contract == "" {
 		failure := newReviewIntegrationPreflightFailure(operation, "empty_contract", "The review integration contract cannot be empty.")
+		failure.LineageID = safeReviewIntegrationLineage(args[1:])
 		return operation, true, &failure
 	}
 	if contract != ReviewIntegrationContractV1 {
 		failure := newReviewIntegrationPreflightFailure(operation, "unsupported_contract", "The requested review integration contract is not supported.")
+		failure.LineageID = safeReviewIntegrationLineage(args[1:])
 		return operation, true, &failure
 	}
 	return operation, true, nil
@@ -137,7 +140,7 @@ func newReviewIntegrationPreflightFailure(operation, code, message string) Revie
 	return ReviewIntegrationFailure{
 		Schema: ReviewIntegrationFailureSchema, Contract: ReviewIntegrationContractV1, Operation: operation,
 		Phase: "preflight", Code: code, Message: message, MutationOutcome: ReviewMutationNotStarted,
-		AuthorityApplicability: "not_evaluated", RetrySafe: false,
+		AuthorityApplicability: "not_evaluated", RetrySafe: true,
 		Replayability: reviewtransaction.ReplayabilityNotReplayable, RequiredInputs: []string{}, NextAction: "correct_request",
 	}
 }
@@ -150,9 +153,12 @@ func newReviewIntegrationFailure(operation string, args []string, runErr error) 
 		MutationOutcome: ReviewMutationUnknown, AuthorityApplicability: "not_evaluated", RetrySafe: false,
 		Replayability: reviewtransaction.ReplayabilityStatusRequired, RequiredInputs: []string{}, NextAction: "review.status",
 	}
+	failure.LineageID = safeReviewIntegrationLineage(args)
 	var preflight *reviewIntegrationPreflightError
 	if errors.As(runErr, &preflight) {
-		return newReviewIntegrationPreflightFailure(operation, "invalid_request", "The negotiated review request is invalid.")
+		preflightFailure := newReviewIntegrationPreflightFailure(operation, "invalid_request", "The negotiated review request is invalid.")
+		preflightFailure.LineageID = failure.LineageID
+		return preflightFailure
 	}
 	var legacy *reviewtransaction.LegacyReadOnlyError
 	if errors.As(runErr, &legacy) {

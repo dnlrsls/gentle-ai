@@ -1773,7 +1773,7 @@ func equalStrings(left, right []string) bool {
 
 func isConcreteEvidence(value string) bool {
 	trimmed := strings.TrimSpace(value)
-	if trimmed == "" || strings.ContainsAny(trimmed, "{}<>") {
+	if trimmed == "" {
 		return false
 	}
 	switch strings.ToLower(trimmed) {

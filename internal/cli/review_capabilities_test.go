@@ -190,12 +190,12 @@ func stubReviewCapabilityIdentity(t *testing.T, executable string) func() {
 	previousVersion := AppVersion
 	previousExecutable := reviewCapabilitiesExecutablePath
 	previousBuildInfo := reviewCapabilitiesBuildInfoReader
-	AppVersion = "2.1.6-test"
+	AppVersion = "2.1.7-test"
 	reviewCapabilitiesExecutablePath = func() (string, error) { return executable, nil }
 	reviewCapabilitiesBuildInfoReader = func() (*debug.BuildInfo, bool) {
 		return &debug.BuildInfo{
 			GoVersion: "go1.25.10",
-			Main:      debug.Module{Path: "github.com/gentleman-programming/gentle-ai", Version: "v2.1.6"},
+			Main:      debug.Module{Path: "github.com/gentleman-programming/gentle-ai", Version: "v2.1.7"},
 			Settings: []debug.BuildSetting{
 				{Key: "vcs", Value: "git"},
 				{Key: "vcs.revision", Value: "0123456789abcdef0123456789abcdef01234567"},

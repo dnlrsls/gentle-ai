@@ -567,7 +567,7 @@ func RunReviewFacadeFinalize(args []string, stdout io.Writer) error {
 		return err
 	}
 	if countFacadeStdin(resultPaths, *validationPath, *refuterPath, *evidencePath) > 1 {
-		return errors.New("review finalize accepts stdin for only one input")
+		return reviewPreflightError(errors.New("review finalize accepts stdin for only one input"))
 	}
 	root, err := (reviewtransaction.SnapshotBuilder{Repo: *cwd}).ResolveRepositoryRoot(context.Background())
 	if err != nil {
@@ -606,36 +606,36 @@ func RunReviewFacadeFinalize(args []string, stdout io.Writer) error {
 	}
 	reviewerResults, err := readFacadeReviewerResults(resultPaths)
 	if err != nil {
-		return err
+		return reviewPreflightError(err)
 	}
 	var validation *facadeValidationResult
 	if strings.TrimSpace(*validationPath) != "" {
 		validation = &facadeValidationResult{}
 		if err := readFacadeJSON(*validationPath, validation); err != nil {
-			return fmt.Errorf("read targeted validation: %w", err)
+			return reviewPreflightError(fmt.Errorf("read targeted validation: %w", err))
 		}
 	}
 	var refuter facadeRefuterResult
 	if strings.TrimSpace(*refuterPath) != "" {
 		if err := readFacadeJSON(*refuterPath, &refuter); err != nil {
-			return fmt.Errorf("read refuter outcomes: %w", err)
+			return reviewPreflightError(fmt.Errorf("read refuter outcomes: %w", err))
 		}
 	}
 	var evidence []byte
 	if strings.TrimSpace(*evidencePath) != "" {
 		evidence, err = readFacadeBytes(*evidencePath)
 		if err != nil {
-			return fmt.Errorf("read final review evidence: %w", err)
+			return reviewPreflightError(fmt.Errorf("read final review evidence: %w", err))
 		}
 	}
 
 	if state.State == reviewtransaction.StateReviewing {
 		input, err := prepareCompactReviewerResults(state, reviewerResults, refuter)
 		if err != nil {
-			return err
+			return reviewPreflightError(err)
 		}
 		if err := state.CompleteReview(input); err != nil {
-			return fmt.Errorf("complete compact review: %w", err)
+			return reviewPreflightError(fmt.Errorf("complete compact review: %w", err))
 		}
 		revision, err := store.Replace(record.Revision, "review/complete-review", state)
 		if err != nil {
@@ -948,7 +948,20 @@ func prepareCompactReviewerResults(state reviewtransaction.CompactState, results
 	classifications := make([]reviewtransaction.FindingEvidence, 0)
 	for index, reviewer := range results {
 		lensResult, rawFindings := reviewer.nativeLensResult()
-		lensResult.Lens = state.SelectedLenses[index]
+		expectedLens := state.SelectedLenses[index]
+		if reviewer.Lens != "" {
+			providedLens, err := nativeFacadeReviewerLens(reviewer.Lens)
+			if err != nil {
+				return reviewtransaction.CompactReviewInput{}, fmt.Errorf("reviewer result %d: %w", index+1, err)
+			}
+			if providedLens != expectedLens {
+				return reviewtransaction.CompactReviewInput{}, fmt.Errorf(
+					"reviewer result %d lens %q does not match selected lens %q",
+					index+1, reviewer.Lens, expectedLens,
+				)
+			}
+		}
+		lensResult.Lens = expectedLens
 		canonical, err := reviewtransaction.CanonicalLensResult(lensResult)
 		if err != nil {
 			return reviewtransaction.CompactReviewInput{}, fmt.Errorf("canonicalize reviewer result %d: %w", index+1, err)
@@ -968,6 +981,21 @@ func prepareCompactReviewerResults(state reviewtransaction.CompactState, results
 	return reviewtransaction.CompactReviewInput{
 		LensResults: lensResults, Classifications: classifications, RefuterOutcomes: refuter.native(),
 	}, nil
+}
+
+func nativeFacadeReviewerLens(lens string) (string, error) {
+	switch lens {
+	case "risk", reviewtransaction.LensRisk:
+		return reviewtransaction.LensRisk, nil
+	case "resilience", reviewtransaction.LensResilience:
+		return reviewtransaction.LensResilience, nil
+	case "readability", reviewtransaction.LensReadability:
+		return reviewtransaction.LensReadability, nil
+	case "reliability", reviewtransaction.LensReliability:
+		return reviewtransaction.LensReliability, nil
+	default:
+		return "", fmt.Errorf("unsupported reviewer lens %q", lens)
+	}
 }
 
 func discoverCompactFacadeReview(ctx context.Context, repo, lineage string, terminal bool) (reviewtransaction.CompactStore, reviewtransaction.CompactRecord, error) {

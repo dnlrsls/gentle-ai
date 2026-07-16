@@ -37,7 +37,7 @@ func TestNegotiatedReviewFailuresUseOneEnvelopeAcrossRoutes(t *testing.T) {
 			}
 			failure := decodeReviewIntegrationFailure(t, output.Bytes())
 			if failure.Operation != tt.operation || failure.Code != "invalid_request" ||
-				failure.MutationOutcome != ReviewMutationNotStarted || failure.RetrySafe ||
+				failure.MutationOutcome != ReviewMutationNotStarted || !failure.RetrySafe ||
 				failure.Replayability != reviewtransaction.ReplayabilityNotReplayable {
 				t.Fatalf("failure = %#v", failure)
 			}
@@ -81,6 +81,41 @@ func TestNegotiatedReviewContractFailuresArePreMutationAndLegacyErrorsStayCompat
 	var publicErr *ReviewIntegrationFailureError
 	if errors.As(err, &publicErr) {
 		t.Fatalf("unnegotiated error became negotiated: %v", err)
+	}
+}
+
+func TestNegotiatedReviewFailuresPreserveRequestedLineage(t *testing.T) {
+	lineage := "review-requested-lineage"
+	tests := []struct {
+		name     string
+		runErr   error
+		wantCode string
+	}{
+		{name: "reviewer preflight", runErr: reviewPreflightError(errors.New("invalid reviewer payload")), wantCode: "invalid_request"},
+		{name: "unknown native outcome", runErr: errors.New("transport interrupted"), wantCode: "operation_outcome_unknown"},
+		{name: "legacy read only", runErr: reviewtransaction.NewLegacyReadOnlyError("review/finalize", lineage), wantCode: reviewtransaction.LegacyReadOnlyErrorCode},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			failure := newReviewIntegrationFailure(
+				ReviewIntegrationOperationFinalize,
+				[]string{"--lineage", lineage},
+				tt.runErr,
+			)
+			if failure.Code != tt.wantCode || failure.LineageID != lineage {
+				t.Fatalf("failure = %#v", failure)
+			}
+			if err := failure.Validate(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	_, negotiated, routed := reviewIntegrationFailureRoute([]string{
+		"finalize", "--contract=", "--lineage", lineage,
+	})
+	if !negotiated || routed == nil || routed.LineageID != lineage || routed.Code != "empty_contract" {
+		t.Fatalf("routed preflight failure = %#v, negotiated %v", routed, negotiated)
 	}
 }
 

@@ -311,6 +311,70 @@ func TestAssessTargetStatusIgnoresUnrelatedValidLegacyHistory(t *testing.T) {
 	}
 }
 
+func TestAssessTargetStatusKeepsExplicitCompactLineageCurrentWithInvalidLegacyInventory(t *testing.T) {
+	requireSnapshotGit(t)
+	repo := initSnapshotRepo(t)
+	head := strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD"))
+	legacySnapshot, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), Target{Kind: TargetExactRevision, Revision: head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyLineage := "legacy-invalid-history"
+	storeLegacyReviewingStatus(t, repo, legacyLineage, legacySnapshot)
+	legacyStore, err := AuthoritativeStore(context.Background(), repo, legacyLineage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyStore.Dir, "HEAD"), []byte("not-a-revision\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	writeSnapshotFile(t, repo, "tracked.txt", "compact candidate\n")
+	compact := newCompactTestState(t, repo, "review-explicit-current")
+	storeCompactStartAuthority(t, repo, compact)
+	authorityRoot, _, err := reviewAuthorityRoot(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := authorityBytes(t, authorityRoot)
+	request := TargetStatusRequest{
+		Target:    Target{Kind: TargetCurrentChanges, IntendedUntracked: []string{}},
+		LineageID: compact.LineageID,
+	}
+	got, err := AssessTargetStatus(context.Background(), repo, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Applicability != TargetApplicabilityCurrent || got.AuthorityVersion != AuthorityVersionCompact ||
+		got.LineageID != compact.LineageID || got.Action != TargetStatusActionFinalize {
+		t.Fatalf("explicit compact status = %#v", got)
+	}
+
+	unscoped := request
+	unscoped.LineageID = ""
+	global, err := AssessTargetStatus(context.Background(), repo, unscoped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if global.Applicability != TargetApplicabilityCorrupted || global.Action != TargetStatusActionRepairAuthority {
+		t.Fatalf("unscoped invalid inventory did not fail closed: %#v", global)
+	}
+	report, err := InventoryAuthority(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidLegacyEvidence := false
+	for _, entry := range report.Entries {
+		invalidLegacyEvidence = invalidLegacyEvidence || entry.LineageID == legacyLineage && entry.Status == AuthorityStatusInvalid && len(entry.Problems) > 0
+	}
+	if report.Complete || report.Authoritative || !invalidLegacyEvidence {
+		t.Fatalf("invalid legacy inventory diagnostics = %#v", report)
+	}
+	if after := authorityBytes(t, authorityRoot); !reflect.DeepEqual(before, after) {
+		t.Fatal("target status or inventory mutated authority")
+	}
+}
+
 func TestAssessTargetStatusStopsApplicableNonTerminalLegacyWithoutMutation(t *testing.T) {
 	requireSnapshotGit(t)
 	repo := initSnapshotRepo(t)
