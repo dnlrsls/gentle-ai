@@ -214,7 +214,7 @@ func (state CompactState) Validate() error {
 		return errors.New("compact review has more results than selected lenses")
 	}
 	for index, result := range state.LensResults {
-		canonical, canonicalErr := CanonicalLensResult(result)
+		canonical, canonicalErr := CanonicalCompactLensResult(result)
 		if canonicalErr != nil || result.Lens != state.SelectedLenses[index] || !reflect.DeepEqual(result, canonical) {
 			return errors.New("compact lens results must be complete and canonically ordered")
 		}
@@ -303,7 +303,7 @@ func validateCompactFindings(state CompactState) error {
 	}
 	seen := make(map[string]Finding, len(state.Findings))
 	for _, finding := range state.Findings {
-		if err := validateStructuredFinding(finding); err != nil {
+		if err := validateLensFinding(finding, true); err != nil {
 			return err
 		}
 		if _, exists := seen[finding.ID]; exists {
@@ -500,7 +500,7 @@ func (state *CompactState) CompleteReview(input CompactReviewInput) error {
 	state.Findings = []Finding{}
 	for index, result := range input.LensResults {
 		result.Lens = state.SelectedLenses[index]
-		canonical, err := CanonicalLensResult(result)
+		canonical, err := CanonicalCompactLensResult(result)
 		if err != nil {
 			return fmt.Errorf("lens result %d: %w", index+1, err)
 		}
@@ -540,6 +540,12 @@ func (state *CompactState) CompleteReview(input CompactReviewInput) error {
 		item, severeFinding := classifications[finding.ID]
 		if !severeFinding {
 			continue
+		}
+		switch item.Causality {
+		case CausalIntroduced, CausalBehaviorActivated, CausalWorsened:
+			if !findingLocationInGenesis(finding.Location, state.GenesisPaths) {
+				item.Causality = CausalUnknown
+			}
 		}
 		state.Classifications[finding.ID] = item
 		if item.Class == EvidenceInsufficient {
@@ -591,6 +597,31 @@ func (state *CompactState) CompleteReview(input CompactReviewInput) error {
 		state.State = StateValidating
 	}
 	return state.Validate()
+}
+
+func findingLocationInGenesis(location string, genesisPaths []string) bool {
+	separator := strings.LastIndexByte(location, ':')
+	if separator <= 0 || separator == len(location)-1 {
+		return false
+	}
+	line := location[separator+1:]
+	nonzero := false
+	for index := range line {
+		if line[index] < '0' || line[index] > '9' {
+			return false
+		}
+		nonzero = nonzero || line[index] != '0'
+	}
+	logicalPath := location[:separator]
+	if len(logicalPath) >= 3 && logicalPath[1] == ':' && logicalPath[2] == '/' &&
+		((logicalPath[0] >= 'A' && logicalPath[0] <= 'Z') || (logicalPath[0] >= 'a' && logicalPath[0] <= 'z')) {
+		return false
+	}
+	canonical, err := normalizeLogicalPath(logicalPath)
+	if err != nil || canonical != logicalPath || !nonzero {
+		return false
+	}
+	return stringIndex(genesisPaths, canonical) >= 0
 }
 
 func (state *CompactState) Invalidate(reason string) error {

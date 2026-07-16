@@ -800,6 +800,48 @@ func TestReviewFacadeCorrectionFlowResumesFromEachCompactIntermediateState(t *te
 	}
 }
 
+func TestReviewFacadeEscalatesFalseIntroducedFindingOutsideGenesis(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	legacyDir := filepath.Join(repo, "internal", "legacy")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "unsafe.go"), []byte("package legacy\n\nfunc ParseLimit(value int) int {\n\tif value < 0 { panic(\"negative limit\") }\n\treturn value\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runReviewCLIGit(t, repo, "add", "internal/legacy/unsafe.go")
+	runReviewCLIGit(t, repo, "commit", "-qm", "add unchanged production path")
+	candidateDir := filepath.Join(repo, "internal", "candidate")
+	if err := os.MkdirAll(candidateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidateDir, "feature.go"), []byte("package candidate\n\nfunc Enabled() bool { return true }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	started := startFacadeReview(t, repo)
+	reviewer := filepath.Join(t.TempDir(), "reviewer.json")
+	writeReviewCLIJSON(t, reviewer, facadeReviewerResult{Findings: []facadeFinding{{
+		Location: "internal/legacy/unsafe.go:4", Severity: "CRITICAL", Claim: "negative input panics in the unchanged parser",
+		ProofRefs: []string{"the frozen candidate deterministically reproduces the panic"}, EvidenceClass: reviewtransaction.EvidenceDeterministic, CausalDisposition: reviewtransaction.CausalIntroduced,
+	}}, Evidence: []string{"reproduced the defect without candidate-causality evidence"}})
+	var output bytes.Buffer
+	if err := RunReviewFacadeFinalize([]string{"--cwd", repo, "--result", reviewer}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeFacadeFinalize(t, output.Bytes()); got.State != reviewtransaction.StateEscalated {
+		t.Fatalf("false introduced result = %#v", got)
+	}
+	store, _ := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, started.LineageID)
+	record, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	classification := record.State.Classifications["R3-001"]
+	if !reflect.DeepEqual(record.State.GenesisPaths, []string{"internal/candidate/feature.go"}) || classification.Causality != reviewtransaction.CausalUnknown || record.State.Outcomes["R3-001"] != reviewtransaction.OutcomeInconclusive || len(record.State.FixFindingIDs) != 0 || record.State.ProposedCorrectionLines != nil {
+		t.Fatalf("false introduced routing = %#v", record.State)
+	}
+}
+
 func TestReviewFacadeStartCannotResetActiveCorrectionBudget(t *testing.T) {
 	tests := []struct {
 		name       string

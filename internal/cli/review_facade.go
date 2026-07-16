@@ -1340,7 +1340,7 @@ func prepareCompactReviewerResults(state reviewtransaction.CompactState, results
 			}
 		}
 		lensResult.Lens = expectedLens
-		canonical, err := reviewtransaction.CanonicalLensResult(lensResult)
+		canonical, err := reviewtransaction.CanonicalCompactLensResult(lensResult)
 		if err != nil {
 			return reviewtransaction.CompactReviewInput{}, fmt.Errorf("canonicalize reviewer result %d: %w", index+1, err)
 		}
