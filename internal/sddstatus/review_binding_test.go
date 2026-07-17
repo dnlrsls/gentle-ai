@@ -442,15 +442,8 @@ func TestBindApprovedReviewSanitizesHostileGitEnvironmentFromSubdirectory(t *tes
 	} {
 		t.Setenv(name, value)
 	}
-	workingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	relative, err := filepath.Rel(workingDirectory, subdirectory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := BindApprovedReview(context.Background(), relative, "thin", "approved-thin", ""); err != nil {
+	t.Chdir(root)
+	if _, err := BindApprovedReview(context.Background(), "nested", "thin", "approved-thin", ""); err != nil {
 		t.Fatal(err)
 	}
 	store, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), root, "approved-thin")
