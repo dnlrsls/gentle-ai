@@ -2133,7 +2133,7 @@ func TestInjectOpenCodeMultiModeIdempotent(t *testing.T) {
 	if _, err := os.Stat(legacyPluginPath); !os.IsNotExist(err) {
 		t.Fatalf("legacy background-agents plugin should not be installed by default; stat err = %v", err)
 	}
-	for _, plugin := range []string{"model-variants.ts", "skill-registry.ts"} {
+	for _, plugin := range []string{"model-variants.ts", "review-result-artifacts.js", "skill-registry.ts"} {
 		pluginPath := filepath.Join(home, ".config", "opencode", "plugins", plugin)
 		content, err := os.ReadFile(pluginPath)
 		if err != nil {

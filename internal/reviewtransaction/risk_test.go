@@ -447,3 +447,19 @@ func TestCorrectionBudgetBoundaries(t *testing.T) {
 		t.Fatal("CorrectionBudget() accepted negative original lines")
 	}
 }
+
+func TestShellProcessSecurityTargetIsCanonicalHighRisk(t *testing.T) {
+	stats := []DiffStat{{Path: "internal/security/process.sh", Additions: 3, OldMode: "100644", NewMode: "100644"}}
+	reasons := deriveSnapshotRiskReasons(stats, 3)
+	want := []RiskReason{
+		{Code: RiskReasonHotPath, Signal: SignalSecurity, Path: "internal/security/process.sh"},
+		{Code: RiskReasonShellSource, Signal: SignalShellProcess, Path: "internal/security/process.sh"},
+	}
+	if !reflect.DeepEqual(reasons, want) {
+		t.Fatalf("risk reasons = %#v, want %#v", reasons, want)
+	}
+	risk, err := ClassifyRisk(RiskInput{Stats: stats, Signals: riskSignalsFromReasons(reasons)})
+	if err != nil || risk != RiskHigh {
+		t.Fatalf("ClassifyRisk() = %q, %v", risk, err)
+	}
+}

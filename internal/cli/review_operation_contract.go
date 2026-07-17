@@ -52,6 +52,7 @@ type ReviewIntegrationFailure struct {
 	RequiredInputs         []string                        `json:"required_inputs"`
 	NextAction             string                          `json:"next_action"`
 	Context                *reviewtransaction.GateContext  `json:"context,omitempty"`
+	CauseCategory          string                          `json:"cause_category,omitempty"`
 }
 
 type ReviewIntegrationFailureError struct {
@@ -313,6 +314,7 @@ func newReviewIntegrationFailure(operation string, args []string, runErr error) 
 			failure.NextAction = "review.status"
 		case ReviewAuthorityCorrupted:
 			failure.AuthorityApplicability = "corrupted"
+			failure.CauseCategory = discovery.Category
 		}
 		return failure
 	}
@@ -428,7 +430,7 @@ func reviewIntegrationOperationFlagShape(operation string) map[string]reviewInte
 	case "review.capabilities":
 	case "review.start":
 		valueFlags = append(valueFlags, "cwd", "lineage", "policy", "focus", "base-ref", "projection", "trace")
-		boolFlags = append(boolFlags, "committed-only")
+		boolFlags = append(boolFlags, "committed-only", "workspace-overlay")
 	case "review.status":
 		valueFlags = append(valueFlags, "cwd", "lineage", "projection", "base-ref")
 	case ReviewIntegrationOperationFinalize:

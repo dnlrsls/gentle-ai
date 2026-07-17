@@ -31,7 +31,7 @@
       "required": ["major", "minor"],
       "properties": {
         "major": {"const": 1},
-        "minor": {"const": 0}
+        "minor": {"const": 1}
       }
     },
     "package": {
@@ -191,6 +191,7 @@
       "properties": {
         "name": {
           "enum": [
+            "base_ref_workspace_overlay",
             "compact_v2_authority",
             "exact_receipt_replay",
             "five_delivery_gates",

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -194,6 +195,129 @@ func TestNegotiatedReviewStartPreservesPrePolicyLargeDocumentationAuthority(t *t
 	if aligned.Level != reviewtransaction.RiskHigh || aligned.DominantLens != "" ||
 		!reflect.DeepEqual(aligned.Reasons, []reviewtransaction.RiskReason{{Code: reviewtransaction.RiskReasonLargeChange}}) {
 		t.Fatalf("pre-policy aligned assessment = %#v", aligned)
+	}
+}
+
+func TestNegotiatedReviewStartExposesExplicitWorkspaceOverlayMode(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	base := strings.TrimSpace(runReviewCLIGit(t, repo, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(repo, "committed.go"), []byte("package committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runReviewCLIGit(t, repo, "add", "committed.go")
+	runReviewCLIGit(t, repo, "commit", "-qm", "branch")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("overlay\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, args := range [][]string{
+		{"--cwd", repo, "--workspace-overlay"},
+		{"--cwd", repo, "--base-ref", base, "--workspace-overlay", "--committed-only"},
+		{"--cwd", repo, "--base-ref", base, "--workspace-overlay", "--projection", "staged"},
+	} {
+		if err := RunReviewFacadeStart(args, io.Discard); err == nil {
+			t.Fatalf("RunReviewFacadeStart(%v) succeeded", args)
+		}
+	}
+
+	var output bytes.Buffer
+	err := RunReviewFacadeStart([]string{
+		"--contract", ReviewIntegrationContractV1, "--cwd", repo, "--base-ref", base,
+		"--workspace-overlay", "--lineage", "review-overlay-contract",
+	}, &output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result ReviewIntegrationStartResult
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.TargetMode != reviewtransaction.TargetBaseWorkspaceOverlay || result.Projection != reviewtransaction.ProjectionWorkspace {
+		t.Fatalf("negotiated overlay mode = %#v", result)
+	}
+}
+
+func TestReviewRecoverRetainsWorkspaceOverlayBaseAndFullScope(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	base := strings.TrimSpace(runReviewCLIGit(t, repo, "rev-parse", "HEAD"))
+	if err := os.WriteFile(filepath.Join(repo, "committed.txt"), []byte("committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runReviewCLIGit(t, repo, "add", "committed.txt")
+	runReviewCLIGit(t, repo, "commit", "-qm", "branch")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("overlay\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	lineage := "overlay-recovery-predecessor"
+	if err := RunReviewFacadeStart([]string{"--cwd", repo, "--base-ref", base, "--workspace-overlay", "--lineage", lineage}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	store, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, lineage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := predecessor.State
+	results := make([]reviewtransaction.LensResult, len(state.SelectedLenses))
+	for index, lens := range state.SelectedLenses {
+		results[index] = reviewtransaction.LensResult{Lens: lens, Findings: []reviewtransaction.Finding{}, Evidence: []string{"reviewed"}}
+	}
+	if err := state.CompleteReview(reviewtransaction.CompactReviewInput{LensResults: results}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Replace(predecessor.Revision, "review/complete-review", state); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CompleteVerification([]byte("verified\n"), true); err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Replace(predecessor.Revision, "review/complete-verification", state); err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{
+		"--cwd", repo, "--predecessor-lineage", lineage, "--expected-predecessor-revision", predecessor.Revision,
+		"--successor-lineage", "overlay-recovery-successor", "--disposition", "scope_changed", "--reason", "scope changed", "--actor", "maintainer",
+	}
+	if err := RunReviewRecover(args, io.Discard); err == nil || !strings.Contains(err.Error(), "scope has not changed") {
+		t.Fatalf("unchanged overlay recovery error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "new.txt"), []byte("new scope\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunReviewRecover(args, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	successorStore, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, "overlay-recovery-successor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, err := successorStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := successor.State.InitialSnapshot
+	if snapshot.Kind != reviewtransaction.TargetBaseWorkspaceOverlay || snapshot.BaseTree != predecessor.State.InitialSnapshot.BaseTree || snapshot.Identity == predecessor.State.InitialSnapshot.Identity ||
+		!reflect.DeepEqual(snapshot.Paths, []string{"committed.txt", "new.txt", "tracked.txt"}) {
+		t.Fatalf("recovered overlay snapshot = %#v", snapshot)
+	}
+}
+
+func TestHighRiskAlwaysSelectsCanonical4R(t *testing.T) {
+	lenses, err := facadeSelectedLenses(reviewtransaction.RiskAssessment{Level: reviewtransaction.RiskHigh}, "reliability")
+	want := []string{"review-risk", "review-resilience", "review-readability", "review-reliability"}
+	if err != nil || !reflect.DeepEqual(lenses, want) {
+		t.Fatalf("high-risk lenses = %v, %v", lenses, err)
 	}
 }
 

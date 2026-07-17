@@ -644,6 +644,7 @@ func (s *Service) componentOperations(adapter agents.Adapter, componentID model.
 			for _, pluginPath := range []string{
 				filepath.Join(pluginDir, "background-agents.ts"),
 				filepath.Join(pluginDir, "model-variants.ts"),
+				filepath.Join(pluginDir, "review-result-artifacts.js"),
 				filepath.Join(pluginDir, "skill-registry.ts"),
 			} {
 				targets = append(targets, pluginPath)

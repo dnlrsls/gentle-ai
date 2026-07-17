@@ -222,7 +222,7 @@ func TestSnapshotProjectionValidationAndIdentity(t *testing.T) {
 		t.Fatalf("unknown projection error = %v", err)
 	}
 	stagedBaseDiff, err := builder.Build(context.Background(), Target{Kind: TargetBaseDiff, Projection: ProjectionStaged, BaseRef: "HEAD", IntendedUntracked: []string{}})
-	if err != nil || stagedBaseDiff.Projection != ProjectionStaged || stagedBaseDiff.CandidateTree != strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD^{tree}")) {
+	if err != nil || stagedBaseDiff.Projection != ProjectionStaged || stagedBaseDiff.CandidateTree != staged.CandidateTree {
 		t.Fatalf("staged base-diff snapshot = %#v, err=%v", stagedBaseDiff, err)
 	}
 	if _, err := builder.Build(context.Background(), Target{Kind: TargetBaseDiff, Projection: ProjectionStaged, BaseRef: "HEAD", IntendedUntracked: []string{"untracked.txt"}}); err == nil || !strings.Contains(err.Error(), "does not accept intended-untracked") {
@@ -681,6 +681,112 @@ func initSnapshotRepo(t *testing.T) string {
 	gitSnapshot(t, repo, "add", "--", "tracked.txt", "deleted.txt")
 	gitSnapshot(t, repo, "commit", "-m", "base")
 	return repo
+}
+
+func TestBaseWorkspaceOverlayFreezesFullBoundaryWithoutMutation(t *testing.T) {
+	requireSnapshotGit(t)
+	repo := initSnapshotRepo(t)
+	base := strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD"))
+	writeSnapshotFile(t, repo, "committed.txt", "committed\n")
+	gitSnapshot(t, repo, "add", "committed.txt")
+	gitSnapshot(t, repo, "commit", "-m", "branch change")
+	writeSnapshotFile(t, repo, "tracked.txt", "staged\n")
+	gitSnapshot(t, repo, "add", "tracked.txt")
+	writeSnapshotFile(t, repo, "tracked.txt", "workspace wins\n")
+	writeSnapshotFile(t, repo, "new.txt", "intended\n")
+
+	beforeIndex := strings.TrimSpace(gitSnapshot(t, repo, "write-tree"))
+	beforeStatus := gitSnapshot(t, repo, "status", "--porcelain=v1")
+	target := Target{Kind: TargetBaseWorkspaceOverlay, BaseRef: base, IntendedUntracked: []string{"new.txt"}}
+	snapshot, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), target)
+	if err != nil {
+		t.Fatalf("Build(base workspace overlay): %v", err)
+	}
+	if got, want := snapshot.Paths, []string{"committed.txt", "new.txt", "tracked.txt"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Paths = %v, want %v", got, want)
+	}
+	if got := gitSnapshot(t, repo, "show", snapshot.CandidateTree+":tracked.txt"); got != "workspace wins\n" {
+		t.Fatalf("candidate tracked.txt = %q", got)
+	}
+	if after := strings.TrimSpace(gitSnapshot(t, repo, "write-tree")); after != beforeIndex {
+		t.Fatalf("index changed: %s -> %s", beforeIndex, after)
+	}
+	if after := gitSnapshot(t, repo, "status", "--porcelain=v1"); after != beforeStatus {
+		t.Fatalf("status changed:\n%s\nwant:\n%s", after, beforeStatus)
+	}
+
+	headBase, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), Target{
+		Kind: TargetBaseWorkspaceOverlay, BaseRef: "HEAD", IntendedUntracked: []string{"new.txt"},
+	})
+	if err != nil {
+		t.Fatalf("Build(second base): %v", err)
+	}
+	if headBase.CandidateTree != snapshot.CandidateTree || headBase.Identity == snapshot.Identity {
+		t.Fatalf("identity must bind base: first=%s second=%s", snapshot.Identity, headBase.Identity)
+	}
+	writeSnapshotFile(t, repo, "new.txt", "mutated\n")
+	live, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), target)
+	if err != nil {
+		t.Fatalf("Build(mutated overlay): %v", err)
+	}
+	if live.Identity == snapshot.Identity {
+		t.Fatal("overlay mutation did not change identity")
+	}
+}
+
+func TestBaseWorkspaceOverlayPreCommitUsesExactStagedIndexWithoutMutation(t *testing.T) {
+	requireSnapshotGit(t)
+	repo := initSnapshotRepo(t)
+	base := strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD"))
+	writeSnapshotFile(t, repo, "committed.txt", "committed\n")
+	gitSnapshot(t, repo, "add", "committed.txt")
+	gitSnapshot(t, repo, "commit", "-m", "branch change")
+	writeSnapshotFile(t, repo, "tracked.txt", "overlay\n")
+	state := newCompactStartStateForTarget(t, repo, "overlay-precommit", Target{
+		Kind: TargetBaseWorkspaceOverlay, BaseRef: base, IntendedUntracked: []string{},
+	})
+	store, err := CompactAuthoritativeStore(context.Background(), repo, state.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := store.Replace("", "review/start", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make([]LensResult, len(state.SelectedLenses))
+	for index, lens := range state.SelectedLenses {
+		results[index] = LensResult{Lens: lens, Findings: []Finding{}, Evidence: []string{"reviewed"}}
+	}
+	if err := state.CompleteReview(CompactReviewInput{LensResults: results}); err != nil {
+		t.Fatal(err)
+	}
+	revision, err = store.Replace(revision, "review/complete-review", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.CompleteVerification([]byte("verified\n"), true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Replace(revision, "review/complete-verification", state); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := state.Receipt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitSnapshot(t, repo, "add", "tracked.txt")
+	beforeIndex := strings.TrimSpace(gitSnapshot(t, repo, "write-tree"))
+	beforeStatus := gitSnapshot(t, repo, "status", "--porcelain=v1")
+	got := EvaluateCompactGate(context.Background(), repo, receipt, NativeGateRequestInput{Gate: GatePreCommit, LineageID: state.LineageID})
+	if got.Result != GateAllow || got.Context.BaseTree != state.InitialSnapshot.BaseTree || got.Context.CandidateTree != state.InitialSnapshot.CandidateTree {
+		t.Fatalf("overlay pre-commit gate = %#v", got)
+	}
+	if after := strings.TrimSpace(gitSnapshot(t, repo, "write-tree")); after != beforeIndex {
+		t.Fatalf("index changed: %s -> %s", beforeIndex, after)
+	}
+	if after := gitSnapshot(t, repo, "status", "--porcelain=v1"); after != beforeStatus {
+		t.Fatalf("status changed:\n%s\nwant:\n%s", after, beforeStatus)
+	}
 }
 
 func requireSnapshotGit(t *testing.T) {

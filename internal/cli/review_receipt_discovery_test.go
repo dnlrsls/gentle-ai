@@ -285,15 +285,32 @@ func TestUnscopedGateDiscoveryFailsClosedOnMalformedUnrelatedInventory(t *testin
 	}
 
 	var explicit bytes.Buffer
-	if err := RunReview([]string{
-		"validate", "--contract", ReviewIntegrationContractV1, "--cwd", repo, "--lineage", started.LineageID,
-		"--gate", string(reviewtransaction.GatePostApply),
-	}, &explicit); err != nil {
-		t.Fatalf("explicit lineage was poisoned by unrelated inventory: %v\n%s", err, explicit.String())
+	statePath := filepath.Join(commonDir, "gentle-ai", "review-transactions", "v2", started.LineageID, "review-state.json")
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		var current bytes.Buffer
+		if err := RunReview([]string{
+			"validate", "--contract", ReviewIntegrationContractV1, "--cwd", repo, "--lineage", started.LineageID,
+			"--gate", string(reviewtransaction.GatePostApply),
+		}, &current); err != nil {
+			t.Fatalf("explicit lineage was poisoned by unrelated inventory: %v\n%s", err, current.String())
+		}
+		if attempt == 0 {
+			explicit = current
+		} else if current.String() != explicit.String() {
+			t.Fatalf("repeated explicit validation changed bytes:\n%s\n%s", explicit.String(), current.String())
+		}
+	}
+	after, err := os.ReadFile(statePath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("explicit validation mutated authority: %v", err)
 	}
 
 	var unscoped bytes.Buffer
-	err := RunReview([]string{
+	err = RunReview([]string{
 		"validate", "--contract", ReviewIntegrationContractV1, "--cwd", repo,
 		"--gate", string(reviewtransaction.GatePostApply),
 	}, &unscoped)
@@ -301,7 +318,7 @@ func TestUnscopedGateDiscoveryFailsClosedOnMalformedUnrelatedInventory(t *testin
 		t.Fatal("unscoped discovery ignored malformed unrelated inventory")
 	}
 	failure := decodeReviewIntegrationFailure(t, unscoped.Bytes())
-	if failure.Code != "authority_corrupted" || failure.AuthorityApplicability != "corrupted" || failure.RetrySafe || failure.NextAction != "stop" {
+	if failure.Code != "authority_corrupted" || failure.AuthorityApplicability != "corrupted" || failure.CauseCategory != "record_or_graph_invalid" || failure.RetrySafe || failure.NextAction != "stop" {
 		t.Fatalf("corrupted inventory failure = %#v", failure)
 	}
 }

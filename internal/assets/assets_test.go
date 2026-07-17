@@ -2,10 +2,132 @@ package assets
 
 import (
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 )
+
+func TestReviewResultArtifactsPluginRuntime(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node is required for OpenCode plugin runtime contract")
+	}
+	temp := t.TempDir()
+	module := filepath.Join(temp, "review-result-artifacts.mjs")
+	if err := os.WriteFile(module, []byte(MustRead("opencode/plugins/review-result-artifacts.js")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(temp, "contract.mjs")
+	contract := `
+import assert from "node:assert/strict"
+import { chmod, lstat, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises"
+import path from "node:path"
+import { pathToFileURL } from "node:url"
+const { canonicalReviewerResult, persistReviewerResult, ReviewResultArtifactsPlugin } = await import(pathToFileURL(process.argv[2]))
+const root = process.argv[3]
+const clean = '{"findings":[],"evidence":["inspected immutable diff"]}'
+assert.throws(() => canonicalReviewerResult(clean + " prose"))
+assert.throws(() => canonicalReviewerResult('{"findings":[],"evidence":["x"],"extra":true}'))
+const binding = (lens) => ({lineage:"review-runtime",target:"sha256:"+"a".repeat(64),lens})
+const valid = await persistReviewerResult(root, binding("risk"), clean)
+assert.equal(valid.order, 0)
+assert.equal((await lstat(valid.path)).mode & 0o777, process.platform === "win32" ? (await lstat(valid.path)).mode & 0o777 : 0o600)
+assert.equal((await readFile(valid.path, "utf8")), clean + "\n")
+await assert.rejects(() => persistReviewerResult(root, binding("risk"), clean), /duplicate/)
+for (const [name, fault, pattern] of [
+  ["deleted", (file) => rm(file), /ENOENT/],
+  ["hash", (file) => writeFile(file, "tampered"), /hash mismatch/],
+]) {
+  await assert.rejects(() => persistReviewerResult(path.join(root,name), binding("resilience"), clean, fault), pattern)
+}
+
+const outside = path.join(root, "outside")
+await mkdir(outside, {recursive:true})
+const unsafe = path.join(root, "unsafe")
+await mkdir(unsafe, {recursive:true})
+await symlink(outside, path.join(unsafe, "review-runtime"), "dir")
+await assert.rejects(() => persistReviewerResult(unsafe, binding("readability"), clean), /unsafe/)
+const blocked = path.join(root, "blocked")
+await writeFile(blocked, "not a directory")
+await assert.rejects(() => persistReviewerResult(blocked, binding("reliability"), clean))
+const parallel = await Promise.all(["reliability","risk","readability","resilience"].map((lens) =>
+  persistReviewerResult(path.join(root,"parallel"), binding(lens), clean)))
+assert.deepEqual(parallel.map((item) => item.order).sort(), [0,1,2,3])
+const hooks = await ReviewResultArtifactsPlugin()
+const output = {title:"review",output:clean,metadata:{}}
+await hooks["tool.execute.after"]({tool:"task",sessionID:"s",callID:"c",args:{subagent_type:"review-reliability",prompt:'GENTLE_AI_REVIEW_BINDING {"lineage":"custom-lineage","target":"sha256:` + strings.Repeat("b", 64) + `","lens":"reliability"}\nreview'}}, output)
+assert.equal(JSON.parse(output.output).schema, "gentle-ai.review-result-artifact/v1")
+await hooks["tool.execute.after"]({tool:"task",args:{subagent_type:"review-risk",prompt:'GENTLE_AI_REVIEW_BINDING '+JSON.stringify({lineage:"a".repeat(128),target:"sha256:"+"c".repeat(64),lens:"risk"})+'\n'}}, {output:clean})
+await assert.rejects(() => hooks["tool.execute.after"]({tool:"task",args:{subagent_type:"review-risk",prompt:'GENTLE_AI_REVIEW_BINDING {"lineage":"review-hook","target":"sha256:` + strings.Repeat("b", 64) + `","lens":"resilience"}\n'}}, {output:clean}), /selected lens/)
+`
+	if err := os.WriteFile(script, []byte(contract), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(node, script, module, filepath.Join(temp, "artifacts"))
+	command.Env = append(os.Environ(), "GENTLE_AI_REVIEW_RESULT_ROOT="+filepath.Join(temp, "hook-artifacts"))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("plugin runtime contract: %v\n%s", err, output)
+	}
+}
+
+func TestGoFormatGateContract(t *testing.T) {
+	command := "unformatted=\"$(gofmt -l .)\"\ntest -z \"$unformatted\" || { printf '%s\\n' \"$unformatted\"; exit 1; }"
+	for _, relative := range []string{"../../.github/workflows/ci.yml", "../../.github/PULL_REQUEST_TEMPLATE.md", "../../skills/branch-pr/SKILL.md"} {
+		payload, err := os.ReadFile(relative)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(string(payload), "\n")
+		found := false
+		for index := 0; index+1 < len(lines); index++ {
+			found = found || strings.TrimSpace(lines[index])+"\n"+strings.TrimSpace(lines[index+1]) == command
+		}
+		if !found {
+			t.Errorf("%s does not contain the exact format command", relative)
+		}
+	}
+	workflow, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, job := range []string{"unit-tests", "windows-runtime", "e2e-tests"} {
+		pattern := regexp.MustCompile(`(?m)^  ` + regexp.QuoteMeta(job) + `:\n(?:    .*\n)*?    needs: format$`)
+		if !pattern.Match(workflow) {
+			t.Errorf("workflow job %s is not gated by format", job)
+		}
+	}
+	for _, tt := range []struct {
+		name, source, want string
+		ok                 bool
+	}{
+		{"clean", "package clean\n", "", true}, {"dirty", "package dirty\nfunc x( ){ }\n", "sample.go\n", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "sample.go"), []byte(tt.source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("sh", "-c", command)
+			cmd.Dir = dir
+			output, err := cmd.CombinedOutput()
+			if (err == nil) != tt.ok || string(output) != tt.want {
+				t.Fatalf("format gate output=%q err=%v", output, err)
+			}
+		})
+	}
+}
+
+func TestOrchestratorLifecycleGatesUseKnownLineage(t *testing.T) {
+	for _, agent := range []string{"antigravity", "claude", "codex", "cursor", "gemini", "generic", "hermes", "kimi", "kiro", "opencode", "qwen", "windsurf"} {
+		content := MustRead(agent + "/sdd-orchestrator.md")
+		if !strings.Contains(content, "--lineage <known-lineage>") || strings.Contains(content, "Let the facade discover authority") {
+			t.Errorf("%s orchestrator does not retain exact lineage", agent)
+		}
+	}
+}
 
 func TestOrchestratorsRequireNonSkippableGeneralDelegationTriggers(t *testing.T) {
 	paths := []string{
@@ -45,17 +167,16 @@ func TestOrchestratorsRequireNonSkippableGeneralDelegationTriggers(t *testing.T)
 
 		lifecycleLine := markdownLineContaining(triggerSection, "**Lifecycle receipt rule**")
 		if !lineContainsAll(
-			"before commit",
+			"Before commit",
 			"stage every reviewed path",
 			"without changing content or mode",
 			"gentle-ai review validate --gate pre-commit --cwd <repo>",
+			"--lineage <known-lineage>",
 			"before push, PR, or release",
-			"content-bound receipt",
-			"gentle-ai review validate --gate <gate> --cwd <repo>",
-			"facade discover authority and artifacts",
+			"same exact `--lineage`",
+			"Never fall back to inventory discovery",
 			"launch a lens",
-			"Judgment Day",
-			"new budget at the gate",
+			"new budget at a repeated gate",
 		)(lifecycleLine) {
 			t.Fatalf("%s lifecycle gate must validate the existing receipt without launching a lens, Judgment Day, or a new budget: %q", path, lifecycleLine)
 		}
@@ -396,10 +517,10 @@ func TestOpenCodeEmbeddedAssetLayout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir(opencode/plugins) error = %v", err)
 	}
-	if len(pluginEntries) != 2 {
-		t.Fatalf("opencode plugins count = %d, want 2", len(pluginEntries))
+	if len(pluginEntries) != 3 {
+		t.Fatalf("opencode plugins count = %d, want 3", len(pluginEntries))
 	}
-	wantPlugins := map[string]bool{"model-variants.ts": true, "skill-registry.ts": true}
+	wantPlugins := map[string]bool{"model-variants.ts": true, "review-result-artifacts.js": true, "skill-registry.ts": true}
 	for _, entry := range pluginEntries {
 		if !wantPlugins[entry.Name()] {
 			t.Fatalf("unexpected plugin entry = %q", entry.Name())
@@ -1643,15 +1764,14 @@ func boundedReviewRoutingProblems(content string) []string {
 		{
 			label: "Lifecycle receipt rule",
 			matcher: lineContainsAll(
-				"before commit",
+				"Before commit",
 				"before push, PR, or release",
-				"content-bound receipt",
 				"gentle-ai review validate --gate pre-commit --cwd <repo>",
-				"gentle-ai review validate --gate <gate> --cwd <repo>",
-				"facade discover authority and artifacts",
-				"never launch a lens",
-				"Judgment Day",
-				"new budget at the gate",
+				"--lineage <known-lineage>",
+				"same exact `--lineage`",
+				"Never fall back to inventory discovery",
+				"launch a lens",
+				"new budget at a repeated gate",
 				"stage every reviewed path",
 				"without changing content or mode",
 			),

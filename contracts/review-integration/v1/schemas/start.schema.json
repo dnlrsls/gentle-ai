@@ -52,6 +52,7 @@
       "items": {"enum": ["review-risk", "review-resilience", "review-readability", "review-reliability"]}
     },
     "projection": {"enum": ["workspace", "staged"]},
+    "target_mode": {"enum": ["current-changes", "base-diff", "base-workspace-overlay"]},
     "changed_files": {"type": "integer", "minimum": 0},
     "changed_lines": {"type": "integer", "minimum": 0},
     "correction_budget": {"type": "integer", "minimum": 0, "maximum": 200},

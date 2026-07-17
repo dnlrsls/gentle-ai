@@ -269,7 +269,7 @@ func EvaluateCompactGate(ctx context.Context, repo string, receipt CompactReceip
 	finalRecord, loadErr := store.Load()
 	finalSnapshot, finalRefs, snapshotErr := buildCompactLifecycleSnapshot(ctx, repo, request)
 	finalUntrackedErr := validateCompactUntrackedScope(ctx, repo, record.State, request)
-	finalTrackedErr := validateCompactCommittedTrackedScope(ctx, repo, request)
+	finalTrackedErr := validateCompactCommittedTrackedScope(ctx, repo, record.State, request)
 	_, graphErr := CompactAuthorityLeaves(ctx, repo)
 	finalSuperseded, supersededErr := CompactLineageSuperseded(ctx, repo, receipt.LineageID)
 	if loadErr != nil || snapshotErr != nil || finalUntrackedErr != nil || finalTrackedErr != nil || graphErr != nil || supersededErr != nil || finalSuperseded || finalRecord.Revision != record.Revision || !reflect.DeepEqual(finalSnapshot, snapshot) || !sameResolvedPrePRRefs(finalRefs, resolvedPrePR) {
@@ -342,7 +342,7 @@ func buildCompactLifecycleSnapshot(ctx context.Context, repo string, request Gat
 	if request.Gate == GatePreCommit && request.Target.Projection == ProjectionStaged {
 		request.Target.IntendedUntracked = []string{}
 	}
-	if request.Target.Kind == TargetFixDiff || request.Target.Kind == TargetBaseDiff && (request.Gate == GatePostApply || request.Gate == GatePreCommit) {
+	if request.Target.Kind == TargetFixDiff || (request.Target.Kind == TargetBaseDiff || request.Target.Kind == TargetBaseWorkspaceOverlay) && (request.Gate == GatePostApply || request.Gate == GatePreCommit) {
 		snapshot, err := (SnapshotBuilder{Repo: repo}).build(ctx, request.Target, request.Gate == GatePreCommit)
 		return snapshot, nil, err
 	}
@@ -370,6 +370,14 @@ func buildCompactGateRequest(ctx context.Context, repo string, state CompactStat
 				Kind: TargetFixDiff, Projection: projection, BaseRef: current.BaseTree,
 				IntendedUntracked: intended, LedgerIDs: append([]string(nil), current.LedgerIDs...),
 			}
+			break
+		}
+		if current.Kind == TargetBaseWorkspaceOverlay {
+			kind := TargetBaseWorkspaceOverlay
+			if input.Gate == GatePreCommit {
+				kind = TargetBaseDiff
+			}
+			request.Target = Target{Kind: kind, Projection: projection, BaseRef: current.BaseTree, IntendedUntracked: intended}
 			break
 		}
 		headTree, err := (SnapshotBuilder{Repo: repo}).resolveTree(ctx, "HEAD")
@@ -451,8 +459,8 @@ func validateCompactUntrackedScope(ctx context.Context, repo string, state Compa
 	return nil
 }
 
-func validateCompactCommittedTrackedScope(ctx context.Context, repo string, request GateRequest) error {
-	if request.Target.Kind != TargetBaseDiff || request.Gate != GatePostApply && request.Gate != GatePreCommit {
+func validateCompactCommittedTrackedScope(ctx context.Context, repo string, state CompactState, request GateRequest) error {
+	if request.Target.Kind != TargetBaseDiff || state.CurrentSnapshot.Kind == TargetBaseWorkspaceOverlay || request.Gate != GatePostApply && request.Gate != GatePreCommit {
 		return nil
 	}
 	dirty, err := (SnapshotBuilder{Repo: repo}).HasDirtyTrackedChanges(ctx)

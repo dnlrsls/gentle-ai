@@ -25,13 +25,14 @@ type ReviewIntegrationStartResult struct {
 	RiskLevel        reviewtransaction.RiskLevel    `json:"risk_level"`
 	SelectedLenses   []string                       `json:"selected_lenses"`
 	Projection       reviewtransaction.Projection   `json:"projection"`
+	TargetMode       reviewtransaction.TargetKind   `json:"target_mode,omitempty"`
 	ChangedFiles     int                            `json:"changed_files"`
 	ChangedLines     int                            `json:"changed_lines"`
 	CorrectionBudget int                            `json:"correction_budget"`
 	RiskReasons      []reviewtransaction.RiskReason `json:"risk_reasons"`
 }
 
-func newReviewIntegrationStartResult(legacy ReviewFacadeStartResult, assessment reviewtransaction.RiskAssessment) (ReviewIntegrationStartResult, error) {
+func newReviewIntegrationStartResult(legacy ReviewFacadeStartResult, assessment reviewtransaction.RiskAssessment, targetMode reviewtransaction.TargetKind) (ReviewIntegrationStartResult, error) {
 	assessment, err := reviewStartAssessmentForFrozenAuthority(legacy, assessment)
 	if err != nil {
 		return ReviewIntegrationStartResult{}, err
@@ -45,6 +46,9 @@ func newReviewIntegrationStartResult(legacy ReviewFacadeStartResult, assessment 
 		State: legacy.State, RiskLevel: legacy.RiskLevel, SelectedLenses: append([]string{}, legacy.SelectedLenses...),
 		Projection: legacy.Projection, ChangedFiles: legacy.ChangedFiles, ChangedLines: legacy.ChangedLines,
 		CorrectionBudget: legacy.CorrectionBudget, RiskReasons: append([]reviewtransaction.RiskReason{}, assessment.Reasons...),
+	}
+	if targetMode == reviewtransaction.TargetBaseWorkspaceOverlay {
+		result.TargetMode = targetMode
 	}
 	if err := result.Validate(); err != nil {
 		return ReviewIntegrationStartResult{}, fmt.Errorf("validate negotiated START response: %w", err)
@@ -89,6 +93,9 @@ func (result ReviewIntegrationStartResult) Validate() error {
 	}
 	if result.Projection != reviewtransaction.ProjectionWorkspace && result.Projection != reviewtransaction.ProjectionStaged {
 		return fmt.Errorf("unsupported negotiated START projection %q", result.Projection)
+	}
+	if result.TargetMode != "" && result.TargetMode != reviewtransaction.TargetBaseWorkspaceOverlay {
+		return fmt.Errorf("unsupported negotiated START target mode %q", result.TargetMode)
 	}
 	if result.ChangedFiles < 0 || result.ChangedLines < 0 {
 		return errors.New("negotiated START change counts cannot be negative")

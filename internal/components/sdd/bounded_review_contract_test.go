@@ -126,7 +126,7 @@ func TestAuthorityFirstTerminalProcedureIsStructuredAndMirrorEligibilityIsClosed
 	rows := parseAuthorityFirstRows(t, authorityFirstTerminalProcedure())
 	wantOperations := []string{
 		"gentle-ai review start", "gentle-ai review finalize",
-		"gentle-ai review validate --gate <gate> --cwd <repo>", "reconcile-terminal-mirrors",
+		"gentle-ai review validate --gate <gate> --cwd <repo> --lineage <known-lineage>", "reconcile-terminal-mirrors",
 	}
 	if len(rows) != len(wantOperations) {
 		t.Fatalf("authority-first rows = %d, want %d", len(rows), len(wantOperations))

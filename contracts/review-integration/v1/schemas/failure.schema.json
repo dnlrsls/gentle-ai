@@ -33,6 +33,7 @@
     "replayability": {"enum": ["not_replayable", "exact_replay_safe", "status_required", "manual_action_required"]},
     "lineage_id": {"type": "string", "maxLength": 128, "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"},
     "request_digest": {"$ref": "#/$defs/sha256"},
+    "cause_category": {"enum": ["inventory_io_or_layout", "lock_ambiguous", "reset_residue", "record_or_graph_invalid", "inventory_incomplete"]},
     "required_inputs": {
       "type": "array",
       "uniqueItems": true,

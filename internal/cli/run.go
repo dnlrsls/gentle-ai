@@ -1707,6 +1707,7 @@ func openCodeSDDPluginPaths(targetDir string) []string {
 	return []string{
 		filepath.Join(targetDir, ".config", "opencode", "plugins", "background-agents.ts"),
 		filepath.Join(targetDir, ".config", "opencode", "plugins", "model-variants.ts"),
+		filepath.Join(targetDir, ".config", "opencode", "plugins", "review-result-artifacts.js"),
 		filepath.Join(targetDir, ".config", "opencode", "plugins", "skill-registry.ts"),
 	}
 }

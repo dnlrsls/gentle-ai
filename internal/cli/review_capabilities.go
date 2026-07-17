@@ -159,7 +159,7 @@ func reviewCapabilitiesStaticSurface() ReviewCapabilitiesResult {
 	return ReviewCapabilitiesResult{
 		Schema:   ReviewIntegrationCapabilitiesSchema,
 		Contract: ReviewIntegrationContractV1,
-		Protocol: ReviewCapabilitiesProtocol{Major: 1, Minor: 0},
+		Protocol: ReviewCapabilitiesProtocol{Major: 1, Minor: 1},
 		Operations: []string{
 			"review.bind_sdd", "review.capabilities", "review.finalize", "review.start", "review.status", "review.validate",
 		},
@@ -197,6 +197,7 @@ func reviewCapabilitiesStaticSurface() ReviewCapabilitiesResult {
 				{Name: "uniform_failure_envelope", Supported: true, Requires: []string{"repository_independent_capabilities"}},
 			},
 			Optional: []ReviewCapabilityFeature{
+				{Name: "base_ref_workspace_overlay", Supported: true, Requires: []string{"immutable_snapshot", "restart_safe_projection"}},
 				{Name: "bounded_process_waits", Supported: true, Requires: []string{"uniform_failure_envelope"}},
 				{Name: "exact_gate_receipt_discovery", Supported: true, Requires: []string{"five_delivery_gates"}},
 				{Name: "native_low_risk_verification", Supported: true, Requires: []string{"compact_v2_authority"}},

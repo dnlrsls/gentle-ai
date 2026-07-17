@@ -3,7 +3,7 @@
   "contract": "gentle-ai.review-integration/v1",
   "protocol": {
     "major": 1,
-    "minor": 0
+    "minor": 1
   },
   "package": {
     "name": "gentle-ai",
@@ -126,6 +126,14 @@
       }
     ],
     "optional": [
+      {
+        "name": "base_ref_workspace_overlay",
+        "supported": true,
+        "requires": [
+          "immutable_snapshot",
+          "restart_safe_projection"
+        ]
+      },
       {
         "name": "bounded_process_waits",
         "supported": true,

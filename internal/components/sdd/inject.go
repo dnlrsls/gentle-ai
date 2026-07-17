@@ -1620,7 +1620,7 @@ func installOpenCodePlugins(homeDir string, adapter agents.Adapter) (InjectionRe
 		}
 	}
 
-	for _, name := range []string{"model-variants.ts", "skill-registry.ts"} {
+	for _, name := range []string{"model-variants.ts", "review-result-artifacts.js", "skill-registry.ts"} {
 		content := assets.MustRead("opencode/plugins/" + name)
 		pluginPath := filepath.Join(pluginsDir, name)
 

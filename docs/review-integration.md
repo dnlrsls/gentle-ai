@@ -15,7 +15,7 @@ gentle-ai review capabilities \
 
 The response identifies the protocol major, package and build identity, executable SHA-256, operations, five gates, projections, schemas, mandatory and optional features, and compatibility window. The executable digest is self-reported evidence; compare it with the published release manifest before trusting the binary.
 
-Protocol v1 advertises additive optional features for `bounded_process_waits`, `exact_gate_receipt_discovery`, `native_low_risk_verification`, `risk_reasons`, and `scope_change_diagnostics`. Consumers that do not recognize an optional feature may ignore it under the advertised compatibility policy; consumers that rely on one must require it explicitly.
+Protocol v1.1 advertises additive optional features for `base_ref_workspace_overlay`, `bounded_process_waits`, `exact_gate_receipt_discovery`, `native_low_risk_verification`, `risk_reasons`, and `scope_change_diagnostics`. Consumers must require `base_ref_workspace_overlay` before sending `--workspace-overlay`; older providers fail closed instead of silently reviewing committed content only.
 
 Consumers MUST reject an incompatible protocol major, an unsupported mandatory feature, an unknown mandatory enum, or a schema identity mismatch. Unknown optional fields may be ignored only under the advertised additive-minor policy. Existing unnegotiated CLI responses remain separate compatibility surfaces and do not gain negotiated fields silently.
 
@@ -25,7 +25,7 @@ Pass the same contract explicitly to negotiated repository operations:
 gentle-ai review start --contract gentle-ai.review-integration/v1 --cwd .
 gentle-ai review status --contract gentle-ai.review-integration/v1 --cwd .
 gentle-ai review finalize --contract gentle-ai.review-integration/v1 --cwd . --lineage <lineage> ...
-gentle-ai review validate --contract gentle-ai.review-integration/v1 --cwd . --gate pre-commit
+gentle-ai review validate --contract gentle-ai.review-integration/v1 --cwd . --gate pre-commit --lineage <lineage>
 gentle-ai review bind-sdd --contract gentle-ai.review-integration/v1 --cwd . --change <change> --lineage <lineage> --expected-binding-revision=<revision>
 ```
 
@@ -55,7 +55,19 @@ Consumers MUST NOT reconstruct receipts, derive canonical hashes, inspect the Gi
 
 `review.start` is the only ordinary entry point that creates a review budget. Finalize continues that frozen lifecycle. Status, validation, and gates are read-only and never allocate a reviewer, actor, lineage, or correction budget.
 
+### Choose the target explicitly
+
+| Invocation | Frozen boundary |
+| --- | --- |
+| `review start` | `HEAD` to the synthetic staged/unstaged/intended-untracked workspace tree. |
+| `review start --base-ref <ref> --committed-only` | `<ref>` to `HEAD`; workspace changes are intentionally excluded. |
+| `review start --base-ref <ref> --workspace-overlay` | `<ref>` to the synthetic workspace tree, including branch commits and the live overlay. |
+
+The overlay mode is workspace-only, incompatible with `--committed-only`, and returned as `target_mode: base-workspace-overlay` by negotiated START and `kind: base-workspace-overlay` by status projection. Existing workspace and committed-only START payloads omit the additive field and remain byte-compatible. The builder writes only temporary Git objects through a copied index; the real index and worktree are never changed.
+
 Reviewer results may omit the top-level `lens`; when present, it must match the selected-lens position returned by start. Both the short names (`risk`, `resilience`, `readability`, `reliability`) and the negotiated facade names (`review-risk`, `review-resilience`, `review-readability`, `review-reliability`) map to the same native lenses. A mismatch is rejected before authority mutation instead of being overwritten.
+
+OpenCode installations include the versioned `review-result-artifacts.js` plugin. Selected `review-*` tasks carry an exact lineage/target/lens binding; the blocking `tool.execute.after` hook accepts one native JSON value, writes a canonical mode-0600 regular file atomically, verifies SHA-256 readback, and returns ordered artifact metadata. FINALIZE must receive only those verified paths in selected-lens order. Reviewer agents remain read-only.
 
 Proof and evidence strings accept ordinary technical notation, including `HEAD^{tree}`, `{}`, `<A>`, and `=>`. Blank values and exact non-evidence sentinels such as `n/a`, `none`, `todo`, `tbd`, `pass`, `passed`, `success`, and `placeholder` remain invalid.
 

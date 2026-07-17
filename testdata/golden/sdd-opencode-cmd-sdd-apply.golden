@@ -47,7 +47,7 @@ Use only the compact facade; it appends and reads back native authority before m
 |---|---|---|---|
 | 01 | `gentle-ai review start` | target, tier, lenses, and budget bound | blocked |
 | 02 | `gentle-ai review finalize` | results, evidence, native transitions, and receipt bound | blocked |
-| 03 | `gentle-ai review validate --gate <gate> --cwd <repo>` | authority, receipt, and live Git checked | blocked |
+| 03 | `gentle-ai review validate --gate <gate> --cwd <repo> --lineage <known-lineage>` | exact authority, receipt, and live Git checked | blocked |
 | 04 | `reconcile-terminal-mirrors` | existing mirrors reconciled | allowed |
 
 After ambiguous output, rerun the same facade operation; native discovery resumes committed authority without another budget. Malformed or ambiguous lineage remains invalid.

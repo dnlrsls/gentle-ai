@@ -35,7 +35,12 @@ Load this skill whenever you need to:
 
 3. Implement changes following specs and design
 
-4. Run tests locally (unit + E2E)
+4. Run the non-mutating Go format gate, then tests locally (unit + E2E)
+
+   ```sh
+   unformatted="$(gofmt -l .)"
+   test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
+   ```
 
 5. Commit using Conventional Commits format
 

@@ -41,6 +41,12 @@ What kind of change does this PR introduce?
 
 ## 🧪 Test Plan
 
+**Go Format**
+```bash
+unformatted="$(gofmt -l .)"
+test -z "$unformatted" || { printf '%s\n' "$unformatted"; exit 1; }
+```
+
 **Unit Tests**
 ```bash
 go test ./...
@@ -52,6 +58,7 @@ cd e2e && ./docker-test.sh
 ```
 
 - [ ] Unit tests pass (`go test ./...`)
+- [ ] Go format gate passes without modifying files
 - [ ] E2E tests pass (`cd e2e && ./docker-test.sh`)
 - [ ] Manually tested locally
 

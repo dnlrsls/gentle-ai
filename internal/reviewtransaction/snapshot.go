@@ -22,10 +22,11 @@ type TargetKind string
 type Projection string
 
 const (
-	TargetCurrentChanges TargetKind = "current-changes"
-	TargetBaseDiff       TargetKind = "base-diff"
-	TargetExactRevision  TargetKind = "commit-range"
-	TargetFixDiff        TargetKind = "fix-diff"
+	TargetCurrentChanges       TargetKind = "current-changes"
+	TargetBaseDiff             TargetKind = "base-diff"
+	TargetBaseWorkspaceOverlay TargetKind = "base-workspace-overlay"
+	TargetExactRevision        TargetKind = "commit-range"
+	TargetFixDiff              TargetKind = "fix-diff"
 
 	ProjectionWorkspace Projection = "workspace"
 	ProjectionStaged    Projection = "staged"
@@ -114,12 +115,23 @@ func (builder SnapshotBuilder) build(ctx context.Context, target Target, allowSt
 		}
 		baseTree, err = builder.resolveTree(ctx, target.BaseRef)
 		if err == nil && projection == ProjectionStaged {
-			candidateTree, err = builder.resolveTree(ctx, "HEAD")
-			if err == nil {
-				untrackedProof, err = builder.untrackedProof(ctx, candidateTree, intended)
-			}
+			_, candidateTree, untrackedProof, err = builder.buildCurrentChanges(ctx, intended, allowStagedIntended, projection)
 		} else if err == nil {
 			candidateTree, untrackedProof, err = builder.buildHeadWithIntended(ctx, intended)
+		}
+	case TargetBaseWorkspaceOverlay:
+		if strings.TrimSpace(target.BaseRef) == "" || strings.Contains(target.BaseRef, "..") {
+			return Snapshot{}, errors.New("base-workspace-overlay requires one base_ref revision")
+		}
+		if projection == ProjectionStaged || target.IntendedUntracked == nil {
+			return Snapshot{}, errors.New("base-workspace-overlay requires workspace projection and explicit intended_untracked")
+		}
+		intended, err = canonicalPaths(target.IntendedUntracked)
+		if err == nil {
+			baseTree, err = builder.resolveTree(ctx, target.BaseRef)
+		}
+		if err == nil {
+			_, candidateTree, untrackedProof, err = builder.buildCurrentChanges(ctx, intended, allowStagedIntended, projection)
 		}
 	case TargetExactRevision:
 		baseTree, candidateTree, err = builder.resolveExactRevision(ctx, target.Revision)
@@ -299,7 +311,7 @@ func rebuildCurrentSnapshotEvidence(ctx context.Context, repo string, snapshot S
 	}
 	switch snapshot.Kind {
 	case TargetCurrentChanges:
-	case TargetBaseDiff:
+	case TargetBaseDiff, TargetBaseWorkspaceOverlay:
 		target.BaseRef = snapshot.BaseTree
 	default:
 		return errors.New("invalidation supports only live current-changes or base-diff snapshots")
@@ -810,7 +822,9 @@ func snapshotIdentity(kind TargetKind, baseTree, candidateTree, pathsDigest, pro
 
 func snapshotIdentityForProjection(kind TargetKind, projection Projection, baseTree, candidateTree, pathsDigest, proof string, intended, ledgerIDs []string) string {
 	hash := sha256.New()
-	if projection == ProjectionStaged {
+	if kind == TargetBaseWorkspaceOverlay {
+		hash.Write([]byte("gentle-ai.review-snapshot/base-workspace-overlay/v1\x00"))
+	} else if projection == ProjectionStaged {
 		hash.Write([]byte("gentle-ai.review-snapshot/v2\x00"))
 	} else {
 		hash.Write([]byte("gentle-ai.review-snapshot/v1\x00"))
