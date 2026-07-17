@@ -1523,6 +1523,35 @@ func TestCompactV2ReadsLegacyNullLensArraysWithoutRewritingAuthority(t *testing.
 	}
 }
 
+func TestSnapshotCandidateLineChangedUsesExactGitHunks(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	writeSnapshotFile(t, repo, "tracked.txt", "same\nold\nkeep\ndeleted\n")
+	gitSnapshot(t, repo, "add", "tracked.txt")
+	gitSnapshot(t, repo, "commit", "-m", "line evidence base")
+	base := strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD"))
+	writeSnapshotFile(t, repo, "tracked.txt", "same\nnew\nkeep\n")
+	if err := os.Remove(filepath.Join(repo, "deleted.txt")); err != nil {
+		t.Fatal(err)
+	}
+	gitSnapshot(t, repo, "add", "-A")
+	gitSnapshot(t, repo, "commit", "-m", "line evidence candidate")
+	snapshot, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), Target{Kind: TargetBaseDiff, BaseRef: base, IntendedUntracked: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		location string
+		want     bool
+	}{{"tracked.txt:2", true}, {"tracked.txt:1", false}, {"deleted.txt:1", false}, {"tracked.txt:0", false}, {"tracked.txt", false}, {"other.txt:2", false}, {"tracked.txt:99", false}} {
+		t.Run(tt.location, func(t *testing.T) {
+			got, err := (SnapshotBuilder{Repo: repo}).CandidateLineChanged(context.Background(), snapshot, tt.location)
+			if err != nil || got != tt.want {
+				t.Fatalf("CandidateLineChanged(%q) = %t, %v", tt.location, got, err)
+			}
+		})
+	}
+}
+
 func newCompactStartStateForTarget(t *testing.T, repo, lineage string, target Target) CompactState {
 	t.Helper()
 	snapshot, err := (SnapshotBuilder{Repo: repo}).Build(context.Background(), target)

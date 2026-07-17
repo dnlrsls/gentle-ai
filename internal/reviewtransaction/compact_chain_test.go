@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -545,6 +546,18 @@ func TestCompactPrePRChainValidationLeavesRepositoryAndAuthorityBytesUnchanged(t
 	}
 	if after := compactChainAuthorityBytes(t, fixture.stores); !reflect.DeepEqual(after, before) {
 		t.Fatal("composition changed authority or receipt bytes")
+	}
+}
+
+func TestCompactStoresShareRepositoryWriteLock(t *testing.T) {
+	fixture := newCompactPrePRChainFixture(t, 2)
+	held, err := acquireStoreLock(fixture.stores[0].lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.release()
+	if _, err := acquireStoreLock(fixture.stores[1].lockPath); !errors.Is(err, ErrConcurrentUpdate) {
+		t.Fatalf("second compact store lock error = %v, want concurrent update", err)
 	}
 }
 

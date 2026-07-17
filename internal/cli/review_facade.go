@@ -365,6 +365,8 @@ func RunReviewRecover(args []string, stdout io.Writer) error {
 	authorization := flags.String("maintainer-authorization", "", "explicit authorization required for escalated or correction-required scope recovery")
 	policySource := flags.String("policy", "", "optional review policy file")
 	focus := flags.String("focus", "reliability", "dominant standard-risk focus")
+	baseRef := flags.String("base-ref", "", "optional base revision for immutable base-to-HEAD review")
+	committedOnly := flags.Bool("committed-only", false, "acknowledge that --base-ref excludes dirty tracked changes")
 	if err := parseReviewFlags(flags, args); err != nil {
 		return err
 	}
@@ -390,6 +392,11 @@ func RunReviewRecover(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("load recovery predecessor: %w", err)
 	}
+	base := strings.TrimSpace(*baseRef)
+	baseDiff := predecessorRecord.State.InitialSnapshot.Kind == reviewtransaction.TargetBaseDiff
+	if *committedOnly != (base != "") || baseDiff != *committedOnly {
+		return errors.New("base-diff recovery requires matching --base-ref and --committed-only")
+	}
 	projection := predecessorRecord.State.InitialSnapshot.Projection
 	intended := []string{}
 	if projection != reviewtransaction.ProjectionStaged {
@@ -398,9 +405,19 @@ func RunReviewRecover(args []string, stdout io.Writer) error {
 			return err
 		}
 	}
-	snapshot, err := (reviewtransaction.SnapshotBuilder{Repo: root}).Build(context.Background(), reviewtransaction.Target{Kind: reviewtransaction.TargetCurrentChanges, Projection: projection, IntendedUntracked: intended})
+	target := reviewtransaction.Target{Kind: reviewtransaction.TargetCurrentChanges, Projection: projection, IntendedUntracked: intended}
+	if *committedOnly {
+		target.Kind, target.BaseRef = reviewtransaction.TargetBaseDiff, base
+	}
+	snapshot, err := (reviewtransaction.SnapshotBuilder{Repo: root}).Build(context.Background(), target)
 	if err != nil {
 		return err
+	}
+	if baseDiff && snapshot.BaseTree != predecessorRecord.State.InitialSnapshot.BaseTree {
+		return errors.New("recovery base-ref does not match predecessor base")
+	}
+	if baseDiff && snapshot.Identity == predecessorRecord.State.InitialSnapshot.Identity {
+		return errors.New("recovery scope has not changed")
 	}
 	risk, changedLines, err := (reviewtransaction.SnapshotBuilder{Repo: root}).ClassifySnapshotRisk(context.Background(), snapshot)
 	if err != nil {
@@ -719,6 +736,19 @@ func runReviewFacadeFinalize(ctx context.Context, args []string, stdout io.Write
 	}
 	store.TracePath = strings.TrimSpace(*tracePath)
 	state := record.State
+	if strings.TrimSpace(*lineage) != "" {
+		leaves, err := reviewtransaction.CompactAuthorityLeaves(ctx, root)
+		if err != nil {
+			return err
+		}
+		current := false
+		for _, leaf := range leaves {
+			current = current || leaf.StatePath() == store.StatePath()
+		}
+		if !current {
+			return fmt.Errorf("review lineage %q is superseded", *lineage)
+		}
+	}
 	terminalAtEntry := facadeTerminalState(state.State)
 	var terminalReceipt reviewtransaction.CompactReceipt
 	terminalReceiptExists := false
@@ -776,7 +806,7 @@ func runReviewFacadeFinalize(ctx context.Context, args []string, stdout io.Write
 	}
 
 	if state.State == reviewtransaction.StateReviewing {
-		input, err := prepareCompactReviewerResults(state, reviewerResults, refuter)
+		input, err := prepareCompactReviewerResults(state, reviewerResults, refuter, facadeRepositoryEvidence{ctx: ctx, repo: root})
 		if err != nil {
 			return reviewPreflightError(err)
 		}
@@ -1331,7 +1361,12 @@ func (result facadeRefuterResult) native() []reviewtransaction.EvidenceResult {
 	return outcomes
 }
 
-func prepareCompactReviewerResults(state reviewtransaction.CompactState, results []facadeReviewerResult, refuter facadeRefuterResult) (reviewtransaction.CompactReviewInput, error) {
+type facadeRepositoryEvidence struct {
+	ctx  context.Context
+	repo string
+}
+
+func prepareCompactReviewerResults(state reviewtransaction.CompactState, results []facadeReviewerResult, refuter facadeRefuterResult, repository ...facadeRepositoryEvidence) (reviewtransaction.CompactReviewInput, error) {
 	if len(results) != len(state.SelectedLenses) {
 		return reviewtransaction.CompactReviewInput{}, fmt.Errorf("review finalize requires all %d original reviewer result(s)", len(state.SelectedLenses))
 	}
@@ -1363,6 +1398,15 @@ func prepareCompactReviewerResults(state reviewtransaction.CompactState, results
 				continue
 			}
 			raw := rawFindings[findingIndex]
+			switch raw.CausalDisposition {
+			case reviewtransaction.CausalIntroduced, reviewtransaction.CausalBehaviorActivated, reviewtransaction.CausalWorsened:
+				if len(repository) == 1 {
+					changed, _ := (reviewtransaction.SnapshotBuilder{Repo: repository[0].repo}).CandidateLineChanged(repository[0].ctx, state.InitialSnapshot, finding.Location)
+					if !changed {
+						raw.CausalDisposition = reviewtransaction.CausalUnknown
+					}
+				}
+			}
 			classifications = append(classifications, reviewtransaction.FindingEvidence{
 				FindingID: finding.ID, Class: raw.EvidenceClass, Causality: raw.CausalDisposition,
 				Proof: strings.Join(raw.ProofRefs, "; "),

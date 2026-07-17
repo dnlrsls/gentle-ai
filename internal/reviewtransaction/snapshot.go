@@ -238,6 +238,36 @@ func (builder SnapshotBuilder) ValidateEvidence(ctx context.Context, snapshot Sn
 	return nil
 }
 
+func (builder SnapshotBuilder) CandidateLineChanged(ctx context.Context, snapshot Snapshot, location string) (bool, error) {
+	if err := builder.ValidateEvidence(ctx, snapshot); err != nil {
+		return false, err
+	}
+	separator := strings.LastIndex(location, ":")
+	if separator <= 0 {
+		return false, nil
+	}
+	logicalPath, err := normalizeLogicalPath(location[:separator])
+	line, lineErr := strconv.Atoi(location[separator+1:])
+	if err != nil || lineErr != nil || line < 1 {
+		return false, nil
+	}
+	output, err := runGit(ctx, builder.Repo, nil, nil, "diff", "--unified=0", "--no-renames", "--no-ext-diff", "--no-textconv", snapshot.BaseTree, snapshot.CandidateTree, "--", literalPathspec(logicalPath))
+	if err != nil {
+		return false, err
+	}
+	for _, match := range regexp.MustCompile(`(?m)^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`).FindAllSubmatch(output, -1) {
+		start, _ := strconv.Atoi(string(match[1]))
+		count := 1
+		if len(match[2]) > 0 {
+			count, _ = strconv.Atoi(string(match[2]))
+		}
+		if count > 0 && line >= start && line < start+count {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func rebuildCurrentSnapshotEvidence(ctx context.Context, repo string, snapshot Snapshot) error {
 	if strings.TrimSpace(repo) == "" {
 		return errors.New("repository evidence is required for invalidation")
