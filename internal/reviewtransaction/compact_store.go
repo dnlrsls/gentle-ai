@@ -764,6 +764,18 @@ func validateCompactRepositoryEvidence(ctx context.Context, repo string, current
 			return errors.New("compact correction size does not match repository evidence")
 		}
 	}
+	if operation == "review/complete-review" {
+		for _, finding := range next.Findings {
+			classification := next.Classifications[finding.ID]
+			switch classification.Causality {
+			case CausalIntroduced, CausalBehaviorActivated, CausalWorsened:
+				changed, err := builder.CandidateLocationSupportsCausality(ctx, next.InitialSnapshot, finding.Location, classification.Causality)
+				if err != nil || !changed {
+					return errors.New("candidate-causal compact finding is not on a repository-derived changed line")
+				}
+			}
+		}
+	}
 	if operation == "review/invalidate" {
 		if err := rebuildCurrentSnapshotEvidence(ctx, repo, next.InitialSnapshot); err != nil {
 			return err

@@ -238,6 +238,54 @@ func (builder SnapshotBuilder) ValidateEvidence(ctx context.Context, snapshot Sn
 	return nil
 }
 
+func (builder SnapshotBuilder) CandidateLocationSupportsCausality(ctx context.Context, snapshot Snapshot, location string, causality CausalDisposition) (bool, error) {
+	if err := builder.ValidateEvidence(ctx, snapshot); err != nil {
+		return false, err
+	}
+	separator := strings.LastIndex(location, ":")
+	if !findingLocationInGenesis(location, snapshot.Paths) {
+		return false, nil
+	}
+	logicalPath := location[:separator]
+	line, _ := strconv.Atoi(location[separator+1:])
+	if causality == CausalBehaviorActivated {
+		for _, tree := range []string{snapshot.BaseTree, snapshot.CandidateTree} {
+			blob, err := runGit(ctx, builder.Repo, nil, nil, "show", tree+":"+logicalPath)
+			if err != nil {
+				continue
+			}
+			lines := bytes.Count(blob, []byte{'\n'})
+			if len(blob) > 0 && blob[len(blob)-1] != '\n' {
+				lines++
+			}
+			if line <= lines {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	if causality != CausalIntroduced && causality != CausalWorsened {
+		return false, nil
+	}
+	output, err := runGit(ctx, builder.Repo, nil, nil, "diff", "--unified=0", "--no-renames", "--no-ext-diff", "--no-textconv", snapshot.BaseTree, snapshot.CandidateTree, "--", literalPathspec(logicalPath))
+	if err != nil {
+		return false, err
+	}
+	for _, match := range regexp.MustCompile(`(?m)^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`).FindAllSubmatch(output, -1) {
+		for offset := 1; offset <= 3; offset += 2 {
+			start, _ := strconv.Atoi(string(match[offset]))
+			count := 1
+			if len(match[offset+1]) > 0 {
+				count, _ = strconv.Atoi(string(match[offset+1]))
+			}
+			if count > 0 && line >= start && line < start+count {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 func rebuildCurrentSnapshotEvidence(ctx context.Context, repo string, snapshot Snapshot) error {
 	if strings.TrimSpace(repo) == "" {
 		return errors.New("repository evidence is required for invalidation")
