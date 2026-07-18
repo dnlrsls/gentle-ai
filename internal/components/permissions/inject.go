@@ -29,8 +29,9 @@ func TargetPath(homeDir string, adapter agents.Adapter) string {
 // CleanupPath returns the file that permission cleanup may modify for the
 // adapter without ever creating it, or an empty string when the agent has no
 // cleanup target. Unlike TargetPath it is not an injection output: callers
-// that snapshot files for backup/rollback should include it only when it
-// already exists, and it must never be treated as a required post-apply file.
+// that snapshot files for backup/rollback should include it when it exists or
+// when its absence cannot be confirmed, and it must never be treated as a
+// required post-apply file.
 func CleanupPath(homeDir string, adapter agents.Adapter) string {
 	if adapter.Agent() == model.AgentCodex {
 		return adapter.MCPConfigPath(homeDir, "")
@@ -196,13 +197,13 @@ func Inject(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
 // profile, it can be removed together with CleanupPath.
 func injectCodexPermissions(homeDir string, adapter agents.Adapter) (InjectionResult, error) {
 	configPath := adapter.MCPConfigPath(homeDir, "")
-	baseTOML, err := osReadFile(configPath)
+	baseTOML, err := os.ReadFile(configPath)
 	if err != nil {
-		return InjectionResult{}, err
-	}
-	if baseTOML == nil {
-		// No config file: nothing to clean, and cleanup never creates one.
-		return InjectionResult{}, nil
+		if os.IsNotExist(err) {
+			// No config file: nothing to clean, and cleanup never creates one.
+			return InjectionResult{}, nil
+		}
+		return InjectionResult{}, fmt.Errorf("read Codex config TOML %q: %w", configPath, err)
 	}
 
 	cleaned := filemerge.RemoveTopLevelTOMLKeyIfValue(string(baseTOML), "approval_policy", "\"on-request\"")

@@ -2,6 +2,7 @@ package permissions
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -492,6 +493,29 @@ func TestInjectCodexMissingConfigDoesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".codex")); !os.IsNotExist(err) {
 		t.Fatalf("Inject() created ~/.codex (stat err = %v), want no file creation", err)
+	}
+}
+
+func TestInjectCodexReadErrorHasTOMLContext(t *testing.T) {
+	home := t.TempDir()
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(configPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(config path): %v", err)
+	}
+
+	_, err := Inject(home, codexAdapter())
+	if err == nil {
+		t.Fatal("Inject() error = nil, want config read error")
+	}
+	if !strings.Contains(err.Error(), "read Codex config TOML") {
+		t.Fatalf("Inject() error = %q, want TOML read context", err)
+	}
+	var pathErr *os.PathError
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("Inject() error = %T, want wrapped *os.PathError", err)
+	}
+	if pathErr.Path != configPath {
+		t.Fatalf("wrapped path = %q, want %q", pathErr.Path, configPath)
 	}
 }
 

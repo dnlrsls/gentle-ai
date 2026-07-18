@@ -715,3 +715,94 @@ model = "gpt-5.5"
 		t.Fatalf("RemoveTopLevelTOMLKeyIfValue() = %q, want %q", got, want)
 	}
 }
+
+func TestRemoveTOMLTableTreeIgnoresHeadersInsideMultilineBasicStrings(t *testing.T) {
+	input := `message = """
+[permissions.gentle-dev]
+user content
+"""
+permissions.gentle-dev.workspace_roots."~" = true
+[other]
+keep = true
+`
+	want := `message = """
+[permissions.gentle-dev]
+user content
+"""
+[other]
+keep = true
+`
+	if got := RemoveTOMLTableTree(input, "permissions.gentle-dev"); got != want {
+		t.Fatalf("RemoveTOMLTableTree() = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveTopLevelTOMLKeyIfValueIgnoresHeadersInsideMultilineLiteralStrings(t *testing.T) {
+	input := `message = '''
+[table]
+user content
+'''
+approval_policy = "on-request"
+`
+	want := `message = '''
+[table]
+user content
+'''
+`
+	if got := RemoveTopLevelTOMLKeyIfValue(input, "approval_policy", "\"on-request\""); got != want {
+		t.Fatalf("RemoveTopLevelTOMLKeyIfValue() = %q, want %q", got, want)
+	}
+}
+
+func TestTOMLRemovalRejectsGoOnlyEscapesInQuotedKeys(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		remove func(string) string
+	}{
+		{
+			name:  "top-level key with hexadecimal escape",
+			input: "\"approval\\x5fpolicy\" = \"on-request\"\n",
+			remove: func(input string) string {
+				return RemoveTopLevelTOMLKeyIfValue(input, "approval_policy", "\"on-request\"")
+			},
+		},
+		{
+			name:  "table key part with hexadecimal escape",
+			input: "[permissions.\"gentle\\x2ddev\"]\nkeep = true\n",
+			remove: func(input string) string {
+				return RemoveTOMLTableTree(input, "permissions.gentle-dev")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.remove(tt.input); got != tt.input {
+				t.Fatalf("removal changed malformed TOML to %q, want untouched %q", got, tt.input)
+			}
+		})
+	}
+}
+
+func TestRemoveTOMLTableTreeRemovesMultilineDottedAssignments(t *testing.T) {
+	tests := []struct {
+		name, assignment string
+	}{
+		{"basic", "permissions.gentle-dev.note = \"\"\"\n[target content]\n\"\"\"\n"},
+		{"literal", "permissions.gentle-dev.note = '''\n[target content]\n'''\n"},
+	}
+	want := `message = """
+[not-a-header]
+"""
+[other]
+keep = true
+`
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RemoveTOMLTableTree(tt.assignment+want, "permissions.gentle-dev"); got != want {
+				t.Fatalf("RemoveTOMLTableTree() = %q, want %q", got, want)
+			}
+		})
+	}
+}

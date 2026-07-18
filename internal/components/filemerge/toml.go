@@ -344,8 +344,16 @@ func RemoveTOMLTableTree(content, tableName string) string {
 	var tablePath []string
 	tableKnown := true
 	removing := false
+	var multilineQuote byte
+	removingMultilineValue := false
 	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "[") {
+		insideMultiline := multilineQuote != 0
+		advanceTOMLMultilineState(line, &multilineQuote)
+		if removingMultilineValue {
+			removingMultilineValue = multilineQuote != 0
+			continue
+		}
+		if !insideMultiline && strings.HasPrefix(strings.TrimSpace(line), "[") {
 			if path, isHeader := parseTOMLTableHeader(line); isHeader {
 				tablePath = path
 				tableKnown = true
@@ -371,6 +379,7 @@ func RemoveTOMLTableTree(content, tableName string) string {
 			if keyPath, isAssignment := parseTOMLAssignmentKey(line); isAssignment {
 				fullPath := append(append([]string(nil), tablePath...), keyPath...)
 				if hasTOMLKeyPathPrefix(fullPath, target) {
+					removingMultilineValue = multilineQuote != 0
 					continue
 				}
 			}
@@ -391,8 +400,11 @@ func RemoveTopLevelTOMLKeyIfValue(content, key, rawValue string) string {
 	lines := strings.SplitAfter(content, "\n")
 	kept := make([]string, 0, len(lines))
 	topLevel := true
+	var multilineQuote byte
 	for _, line := range lines {
-		if topLevel {
+		insideMultiline := multilineQuote != 0
+		advanceTOMLMultilineState(line, &multilineQuote)
+		if topLevel && !insideMultiline {
 			if strings.HasPrefix(strings.TrimSpace(line), "[") {
 				topLevel = false
 			} else if equals := tomlIndexOutsideQuotes(line, '='); equals != -1 {
@@ -474,6 +486,58 @@ func tomlIndexOutsideQuotes(text string, target byte) int {
 	return -1
 }
 
+// advanceTOMLMultilineState tracks whether subsequent lines are inside a TOML
+// multiline basic or literal string. Single-line strings and comments are
+// skipped so quote-like text in either cannot alter the lexical state.
+func advanceTOMLMultilineState(line string, multilineQuote *byte) {
+	var quote byte
+	for pos := 0; pos < len(line); {
+		char := line[pos]
+		if *multilineQuote != 0 {
+			if char == *multilineQuote && pos+2 < len(line) &&
+				line[pos+1] == char && line[pos+2] == char {
+				for pos < len(line) && line[pos] == char {
+					pos++
+				}
+				*multilineQuote = 0
+				continue
+			}
+			if *multilineQuote == '"' && char == '\\' && pos+1 < len(line) {
+				pos += 2
+				continue
+			}
+			pos++
+			continue
+		}
+
+		if quote != 0 {
+			if quote == '"' && char == '\\' && pos+1 < len(line) {
+				pos += 2
+				continue
+			}
+			if char == quote {
+				quote = 0
+			}
+			pos++
+			continue
+		}
+
+		if char == '#' {
+			return
+		}
+		if (char == '"' || char == '\'') && pos+2 < len(line) &&
+			line[pos+1] == char && line[pos+2] == char {
+			*multilineQuote = char
+			pos += 3
+			continue
+		}
+		if char == '"' || char == '\'' {
+			quote = char
+		}
+		pos++
+	}
+}
+
 func parseTOMLKeyPath(text string) ([]string, bool) {
 	var path []string
 	for pos := 0; ; {
@@ -518,8 +582,8 @@ func parseTOMLKeyPart(text string, pos int) (string, int, bool) {
 				continue
 			}
 			if text[end] == '"' {
-				value, err := strconv.Unquote(text[pos : end+1])
-				return value, end + 1, err == nil
+				value, ok := unquoteTOMLBasicKey(text[pos : end+1])
+				return value, end + 1, ok
 			}
 		}
 		return "", pos, false
@@ -533,6 +597,48 @@ func parseTOMLKeyPart(text string, pos int) (string, int, bool) {
 		return "", pos, false
 	}
 	return text[pos:end], end, true
+}
+
+func unquoteTOMLBasicKey(text string) (string, bool) {
+	for pos := 1; pos < len(text)-1; pos++ {
+		if text[pos] != '\\' {
+			continue
+		}
+		pos++
+		if pos >= len(text)-1 {
+			return "", false
+		}
+		switch text[pos] {
+		case 'b', 't', 'n', 'f', 'r', '"', '\\':
+		case 'u':
+			if !hasTOMLHexDigits(text, pos+1, 4) {
+				return "", false
+			}
+			pos += 4
+		case 'U':
+			if !hasTOMLHexDigits(text, pos+1, 8) {
+				return "", false
+			}
+			pos += 8
+		default:
+			return "", false
+		}
+	}
+
+	value, err := strconv.Unquote(text)
+	return value, err == nil
+}
+
+func hasTOMLHexDigits(text string, start, count int) bool {
+	if start+count > len(text)-1 {
+		return false
+	}
+	for _, char := range text[start : start+count] {
+		if !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func isBareTOMLKeyByte(char byte) bool {
