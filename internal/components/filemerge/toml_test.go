@@ -557,3 +557,161 @@ func TestRemoveTOMLTableKeys_Idempotent(t *testing.T) {
 		t.Fatalf("RemoveTOMLTableKeys is not idempotent:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
 }
+
+func TestRemoveTOMLTableTreeRemovesTableAndSubtables(t *testing.T) {
+	input := `model = "gpt-5.5"
+
+[permissions.gentle-dev]
+description = "injected"
+
+[permissions.gentle-dev.network]
+enabled = true
+
+[permissions.gentle-dev.filesystem.":workspace_roots"]
+"." = "write"
+
+[mcp_servers.engram]
+command = "engram"
+`
+	want := `model = "gpt-5.5"
+
+[mcp_servers.engram]
+command = "engram"
+`
+	if got := RemoveTOMLTableTree(input, "permissions.gentle-dev"); got != want {
+		t.Fatalf("RemoveTOMLTableTree() = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveTOMLTableTreePreservesSimilarlyNamedTables(t *testing.T) {
+	input := `[permissions.gentle-dev]
+a = 1
+
+[permissions.gentle-devtools]
+b = 2
+
+[permissions.custom]
+c = 3
+`
+	want := `[permissions.gentle-devtools]
+b = 2
+
+[permissions.custom]
+c = 3
+`
+	if got := RemoveTOMLTableTree(input, "permissions.gentle-dev"); got != want {
+		t.Fatalf("RemoveTOMLTableTree() = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveTOMLTableTreeWithoutTargetIsByteIdentical(t *testing.T) {
+	input := "custom = true\n\n[other] # keep\nkey = \"value\""
+	if got := RemoveTOMLTableTree(input, "permissions.gentle-dev"); got != input {
+		t.Fatalf("RemoveTOMLTableTree() = %q, want untouched %q", got, input)
+	}
+}
+
+func TestRemoveTOMLTableTreeRemovesTopLevelDottedKeys(t *testing.T) {
+	input := `permissions.gentle-dev.workspace_roots."~" = true
+permissions.custom.workspace_roots."~" = true
+
+[other]
+permissions.gentle-dev.x = 1
+`
+	want := `permissions.custom.workspace_roots."~" = true
+
+[other]
+permissions.gentle-dev.x = 1
+`
+	if got := RemoveTOMLTableTree(input, "permissions.gentle-dev"); got != want {
+		t.Fatalf("RemoveTOMLTableTree() = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveTopLevelTOMLKeyIfValueRemovesExactMatch(t *testing.T) {
+	input := `model = "gpt-5.5"
+approval_policy = "on-request"
+
+[table]
+approval_policy = "on-request"
+`
+	want := `model = "gpt-5.5"
+
+[table]
+approval_policy = "on-request"
+`
+	if got := RemoveTopLevelTOMLKeyIfValue(input, "approval_policy", "\"on-request\""); got != want {
+		t.Fatalf("RemoveTopLevelTOMLKeyIfValue() = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveTopLevelTOMLKeyIfValueKeepsCustomizedValue(t *testing.T) {
+	input := "approval_policy = \"never\"\ndefault_permissions = \"other\"\n"
+	got := RemoveTopLevelTOMLKeyIfValue(input, "approval_policy", "\"on-request\"")
+	got = RemoveTopLevelTOMLKeyIfValue(got, "default_permissions", "\"gentle-dev\"")
+	if got != input {
+		t.Fatalf("RemoveTopLevelTOMLKeyIfValue() = %q, want untouched %q", got, input)
+	}
+}
+
+func TestRemoveTOMLTableTreeRecognizesQuotedHeaderSegments(t *testing.T) {
+	input := `[permissions."gentle-dev".workspace_roots]
+"~" = true
+
+[permissions.'gentle-dev'.filesystem]
+":minimal" = "read"
+
+[permissions."custom".workspace_roots]
+"~" = true
+`
+	want := `[permissions."custom".workspace_roots]
+"~" = true
+`
+	if got := RemoveTOMLTableTree(input, "permissions.gentle-dev"); got != want {
+		t.Fatalf("RemoveTOMLTableTree() = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveTOMLTableTreeRemovesQuotedDottedKeys(t *testing.T) {
+	input := `permissions."gentle-dev".workspace_roots."~" = true
+permissions.gentle-dev.workspace_roots."~/project" = true
+permissions."custom".workspace_roots."~" = true
+
+[other]
+"gentle-dev" = true
+`
+	want := `permissions."custom".workspace_roots."~" = true
+
+[other]
+"gentle-dev" = true
+`
+	if got := RemoveTOMLTableTree(input, "permissions.gentle-dev"); got != want {
+		t.Fatalf("RemoveTOMLTableTree() = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveTOMLTableTreeKeepsUserContentAfterMalformedHeader(t *testing.T) {
+	input := "[permissions.gentle-dev]\na = 1\n\n[bad header no closing bracket\nb = 2\n"
+	want := "[bad header no closing bracket\nb = 2\n"
+	if got := RemoveTOMLTableTree(input, "permissions.gentle-dev"); got != want {
+		t.Fatalf("RemoveTOMLTableTree() = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveTOMLTableTreeMalformedHeaderBeforeMatchIsByteIdentical(t *testing.T) {
+	input := "[broken header\npermissions.gentle-dev.x = 1\n"
+	if got := RemoveTOMLTableTree(input, "permissions.gentle-dev"); got != input {
+		t.Fatalf("RemoveTOMLTableTree() = %q, want untouched %q", got, input)
+	}
+}
+
+func TestRemoveTopLevelTOMLKeyIfValueRecognizesQuotedKey(t *testing.T) {
+	input := `"approval_policy" = "on-request"
+model = "gpt-5.5"
+`
+	want := `model = "gpt-5.5"
+`
+	if got := RemoveTopLevelTOMLKeyIfValue(input, "approval_policy", "\"on-request\""); got != want {
+		t.Fatalf("RemoveTopLevelTOMLKeyIfValue() = %q, want %q", got, want)
+	}
+}

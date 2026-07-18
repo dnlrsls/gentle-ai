@@ -2,6 +2,7 @@ package filemerge
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -291,6 +292,10 @@ func RemoveTOMLTableKeys(content, section string, keys []string) string {
 // RemoveTOMLTable removes a complete single TOML table and its key-value lines.
 // It preserves every other table and top-level key verbatim, normalizing CRLF to
 // LF like the other string-based TOML merge helpers in this package.
+//
+// It matches only the exactly-spelled [tableName] header and leaves subtables
+// alone. Use RemoveTOMLTableTree instead to remove a table together with all
+// of its subtables with quote-aware segment matching.
 func RemoveTOMLTable(content, tableName string) string {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	lines := strings.Split(content, "\n")
@@ -315,6 +320,235 @@ func RemoveTOMLTable(content, tableName string) string {
 	}
 
 	return strings.Join(kept, "\n")
+}
+
+// RemoveTOMLTableTree removes the named table and every subtable beneath it —
+// the [tableName] header, all [tableName.*] headers, and their key-value
+// lines — plus dotted assignments whose effective key path falls under the
+// same prefix. Header and key segments are compared after TOML unquoting, so
+// [permissions."gentle-dev"] matches permissions.gentle-dev. Every other line
+// is preserved byte-for-byte so user-authored content, spacing, and comments
+// stay untouched. If tableName itself does not parse as a TOML key path, the
+// content is returned unchanged (silent no-op) — removal never guesses.
+//
+// Use RemoveTOMLTable instead when a single exactly-spelled [header] block
+// should be replaced or dropped without touching its subtables.
+func RemoveTOMLTableTree(content, tableName string) string {
+	target, ok := parseTOMLKeyPath(tableName)
+	if !ok {
+		return content
+	}
+
+	lines := strings.SplitAfter(content, "\n")
+	kept := make([]string, 0, len(lines))
+	var tablePath []string
+	tableKnown := true
+	removing := false
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "[") {
+			if path, isHeader := parseTOMLTableHeader(line); isHeader {
+				tablePath = path
+				tableKnown = true
+				removing = hasTOMLKeyPathPrefix(path, target)
+				if removing {
+					continue
+				}
+			} else {
+				// Malformed header-like line: the table context is now
+				// unknown, so stop removing and keep every following
+				// assignment until a well-formed header re-establishes
+				// context. User content is never silently consumed.
+				removing = false
+				tableKnown = false
+			}
+			kept = append(kept, line)
+			continue
+		}
+		if removing {
+			continue
+		}
+		if tableKnown {
+			if keyPath, isAssignment := parseTOMLAssignmentKey(line); isAssignment {
+				fullPath := append(append([]string(nil), tablePath...), keyPath...)
+				if hasTOMLKeyPathPrefix(fullPath, target) {
+					continue
+				}
+			}
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "")
+}
+
+// RemoveTopLevelTOMLKeyIfValue removes a top-level `key = rawValue` assignment
+// only when its right-hand side matches rawValue exactly (after trimming
+// whitespace). The key is matched after TOML unquoting, so "approval_policy"
+// matches approval_policy. Scanning stops at the first table header so
+// identical keys inside tables are never touched, and a user-customized value
+// — including one annotated with a trailing comment — is preserved. All other
+// lines stay byte-for-byte identical.
+func RemoveTopLevelTOMLKeyIfValue(content, key, rawValue string) string {
+	lines := strings.SplitAfter(content, "\n")
+	kept := make([]string, 0, len(lines))
+	topLevel := true
+	for _, line := range lines {
+		if topLevel {
+			if strings.HasPrefix(strings.TrimSpace(line), "[") {
+				topLevel = false
+			} else if equals := tomlIndexOutsideQuotes(line, '='); equals != -1 {
+				keyPath, isKey := parseTOMLKeyPath(line[:equals])
+				if isKey && len(keyPath) == 1 && keyPath[0] == key &&
+					strings.TrimSpace(line[equals+1:]) == rawValue {
+					continue
+				}
+			}
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "")
+}
+
+// The helpers below are a minimal quote-aware TOML key-path parser used by the
+// removal helpers. They handle bare, single-quoted, and double-quoted key
+// segments plus comments outside quotes, without a TOML parser dependency.
+
+func parseTOMLTableHeader(line string) ([]string, bool) {
+	code := strings.TrimSpace(tomlCodeBeforeComment(line))
+	if len(code) < 3 || code[0] != '[' {
+		return nil, false
+	}
+
+	if strings.HasPrefix(code, "[[") {
+		if len(code) < 5 || !strings.HasSuffix(code, "]]") {
+			return nil, false
+		}
+		return parseTOMLKeyPath(code[2 : len(code)-2])
+	}
+	if !strings.HasSuffix(code, "]") {
+		return nil, false
+	}
+	return parseTOMLKeyPath(code[1 : len(code)-1])
+}
+
+func parseTOMLAssignmentKey(line string) ([]string, bool) {
+	code := tomlCodeBeforeComment(line)
+	equals := tomlIndexOutsideQuotes(code, '=')
+	if equals == -1 {
+		return nil, false
+	}
+	return parseTOMLKeyPath(code[:equals])
+}
+
+func tomlCodeBeforeComment(line string) string {
+	if comment := tomlIndexOutsideQuotes(line, '#'); comment != -1 {
+		return line[:comment]
+	}
+	return line
+}
+
+func tomlIndexOutsideQuotes(text string, target byte) int {
+	var quote byte
+	escaped := false
+	for i := 0; i < len(text); i++ {
+		char := text[i]
+		if quote == '"' && escaped {
+			escaped = false
+			continue
+		}
+		if quote == '"' && char == '\\' {
+			escaped = true
+			continue
+		}
+		if char == '"' || char == '\'' {
+			if quote == 0 {
+				quote = char
+			} else if quote == char {
+				quote = 0
+			}
+			continue
+		}
+		if quote == 0 && char == target {
+			return i
+		}
+	}
+	return -1
+}
+
+func parseTOMLKeyPath(text string) ([]string, bool) {
+	var path []string
+	for pos := 0; ; {
+		pos = skipTOMLKeyWhitespace(text, pos)
+		part, next, ok := parseTOMLKeyPart(text, pos)
+		if !ok {
+			return nil, false
+		}
+		path = append(path, part)
+		pos = skipTOMLKeyWhitespace(text, next)
+		if pos == len(text) {
+			return path, true
+		}
+		if text[pos] != '.' {
+			return nil, false
+		}
+		pos++
+	}
+}
+
+func skipTOMLKeyWhitespace(text string, pos int) int {
+	for pos < len(text) && (text[pos] == ' ' || text[pos] == '\t') {
+		pos++
+	}
+	return pos
+}
+
+func parseTOMLKeyPart(text string, pos int) (string, int, bool) {
+	if pos >= len(text) {
+		return "", pos, false
+	}
+	if text[pos] == '\'' {
+		if end := strings.IndexByte(text[pos+1:], '\''); end != -1 {
+			return text[pos+1 : pos+1+end], pos + end + 2, true
+		}
+		return "", pos, false
+	}
+	if text[pos] == '"' {
+		for end := pos + 1; end < len(text); end++ {
+			if text[end] == '\\' {
+				end++
+				continue
+			}
+			if text[end] == '"' {
+				value, err := strconv.Unquote(text[pos : end+1])
+				return value, end + 1, err == nil
+			}
+		}
+		return "", pos, false
+	}
+
+	end := pos
+	for end < len(text) && isBareTOMLKeyByte(text[end]) {
+		end++
+	}
+	if end == pos {
+		return "", pos, false
+	}
+	return text[pos:end], end, true
+}
+
+func isBareTOMLKeyByte(char byte) bool {
+	return char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '_' || char == '-'
+}
+
+func hasTOMLKeyPathPrefix(path, prefix []string) bool {
+	if len(path) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if path[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // UpsertTopLevelTOMLString inserts or replaces a top-level key = "value" pair
