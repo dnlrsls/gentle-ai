@@ -85,8 +85,7 @@ const ReviewResultArtifactsPlugin: Plugin = async ({ directory, worktree }) => (
   "tool.execute.after": async (input, output) => {
     if (input.tool !== "task" || typeof input.args?.subagent_type !== "string" || !REVIEW_AGENTS.has(input.args.subagent_type)) return
     if (typeof input.args.prompt !== "string" || !BINDING.test(input.args.prompt)) return
-    const lens = input.args.subagent_type.slice("review-".length)
-    const binding = parseBinding(input.args.prompt, lens)
+    const binding = parseBinding(input.args.prompt, input.args.subagent_type)
     output.output = await captureResult(worktree || directory, binding, reviewerResult(output.output))
   },
 })

@@ -434,6 +434,7 @@ func TestReviewResultArtifactsPluginContract(t *testing.T) {
 		`"tool.execute.before"`,
 		`output.args.background === true`,
 		`!BINDING.test(input.args.prompt)`,
+		`parseBinding(input.args.prompt, input.args.subagent_type)`,
 		`output.output = await captureResult`,
 		`export default ReviewResultArtifactsPlugin`,
 	} {
@@ -441,7 +442,7 @@ func TestReviewResultArtifactsPluginContract(t *testing.T) {
 			t.Fatalf("review-result-artifacts.ts missing %q", want)
 		}
 	}
-	for _, forbidden := range []string{"writeFile", "link(", "chmod(", "createHash", "export {", "export const"} {
+	for _, forbidden := range []string{"writeFile", "link(", "chmod(", "createHash", "export {", "export const", `slice("review-".length)`} {
 		if strings.Contains(source, forbidden) {
 			t.Fatalf("review-result-artifacts.ts must delegate native persistence; found %q", forbidden)
 		}
