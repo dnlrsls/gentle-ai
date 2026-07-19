@@ -61,7 +61,7 @@ func WriteFileAtomic(path string, content []byte, perm fs.FileMode) (WriteResult
 		return WriteResult{}, err
 	}
 
-	tmp, err := os.CreateTemp(dir, ".gentle-ai-*.tmp")
+	tmp, err := createAtomicTemp(dir, path)
 	if err != nil {
 		return WriteResult{}, fmt.Errorf("create temp file for %q: %w", path, err)
 	}
