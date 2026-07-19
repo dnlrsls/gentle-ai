@@ -648,6 +648,14 @@ func validateHistoricalFreezeFindings(previous, next Transaction) error {
 	if !validSHA256(next.LedgerHash) {
 		return fmt.Errorf("%w: historical findings freeze requires a ledger hash", ErrInvalidSuccessor)
 	}
+	expected := historicalFreezeFindingsExpected(previous, next)
+	if !transactionsEqual(expected, next) {
+		return fmt.Errorf("%w: historical findings freeze changed unrelated transaction state", ErrInvalidSuccessor)
+	}
+	return nil
+}
+
+func historicalFreezeFindingsExpected(previous, next Transaction) Transaction {
 	expected := previous
 	expected.Findings = nil
 	if next.Findings != nil {
@@ -665,10 +673,7 @@ func validateHistoricalFreezeFindings(previous, next Transaction) error {
 	expected.LedgerHash = next.LedgerHash
 	expected.LedgerFindingsHash = findingsHash(expected.Findings)
 	expected.State = StateFindingsFrozen
-	if !transactionsEqual(expected, next) {
-		return fmt.Errorf("%w: historical findings freeze changed unrelated transaction state", ErrInvalidSuccessor)
-	}
-	return nil
+	return expected
 }
 
 // transactionsEqual compares persisted transaction state. JSON omits empty

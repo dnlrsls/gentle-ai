@@ -60,6 +60,9 @@ type CompactReclaimRecord struct {
 	// it is set only for review-abandon quarantines of pristine reviewing or
 	// pristine invalidated lineages.
 	PristineAbandonment *CompactPristineAbandonmentProof `json:"pristine_abandonment,omitempty"`
+	// MalformedLegacyFreeze carries the natively re-derived semantic replay
+	// failure for a shipped legacy-v1 findings-freeze event.
+	MalformedLegacyFreeze *LegacyMalformedFreezeProof `json:"malformed_legacy_freeze,omitempty"`
 }
 
 // compactAuthoritativeArtifact reports whether a store-entry name carries
