@@ -12,6 +12,26 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestDenyGroupApplies(t *testing.T) {
+	tests := []struct {
+		name       string
+		attributes uint32
+		want       bool
+	}{
+		{"enabled", windows.SE_GROUP_ENABLED, true},
+		{"deny-only", windows.SE_GROUP_USE_FOR_DENY_ONLY, true},
+		{"disabled despite default", windows.SE_GROUP_ENABLED_BY_DEFAULT, false},
+		{"disabled", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := denyGroupApplies(tt.attributes); got != tt.want {
+				t.Fatalf("denyGroupApplies(%#x) = %t, want %t", tt.attributes, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWriteFileAtomicRelaxesWindowsDirectoryACL(t *testing.T) {
 	dir := t.TempDir()
 	requirePersistentACL(t, dir)
@@ -128,6 +148,76 @@ func TestWriteFileAtomicDoesNotBypassExplicitWindowsDeny(t *testing.T) {
 	}
 	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Fatalf("Stat(blocked target) error = %v, want fs.ErrNotExist", statErr)
+	}
+}
+
+func TestWriteFileAtomicIgnoresUnrelatedWindowsDeny(t *testing.T) {
+	dir := t.TempDir()
+	requirePersistentACL(t, dir)
+	restoreDACL(t, dir)
+
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("GetTokenUser() error = %v", err)
+	}
+	unrelated, err := windows.StringToSid("S-1-5-21-1111111111-2222222222-3333333333-1001")
+	if err != nil {
+		t.Fatalf("StringToSid() error = %v", err)
+	}
+	member, err := windows.GetCurrentProcessToken().IsMember(unrelated)
+	if err != nil {
+		t.Fatalf("IsMember(unrelated SID) error = %v", err)
+	}
+	if member {
+		t.Fatal("unrelated SID unexpectedly applies to the current process token")
+	}
+
+	dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		{
+			AccessPermissions: windows.FILE_WRITE_DATA,
+			AccessMode:        windows.DENY_ACCESS,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(unrelated),
+			},
+		},
+		{
+			AccessPermissions: windows.GENERIC_READ | windows.GENERIC_EXECUTE,
+			AccessMode:        windows.GRANT_ACCESS,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(user.User.Sid),
+			},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("ACLFromEntries() error = %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		dir,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatalf("SetNamedSecurityInfo(unrelated-deny fixture) error = %v", err)
+	}
+
+	path := filepath.Join(dir, "allowed.txt")
+	content := []byte("allowed\n")
+	if _, err := WriteFileAtomic(path, content, 0o644); err != nil {
+		t.Fatalf("WriteFileAtomic() error = %v, want unrelated deny ignored", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("file content = %q, want %q", got, content)
 	}
 }
 

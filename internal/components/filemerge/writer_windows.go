@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -14,6 +15,14 @@ import (
 const (
 	fileDeleteChild       windows.ACCESS_MASK = 0x00000040
 	atomicDirectoryRights                     = windows.FILE_WRITE_DATA | fileDeleteChild
+
+	accessDeniedObjectACEType         = 6
+	accessDeniedCallbackACEType       = 10
+	accessDeniedCallbackObjectACEType = 12
+	accessDeniedACEPrefixSize         = 8
+	accessDeniedObjectFlagsSize       = 4
+	guidSize                          = 16
+	minimumSIDSize                    = 8
 )
 
 func createAtomicTemp(dir, target string) (*os.File, error) {
@@ -118,19 +127,93 @@ func deniesAccessRights(dacl *windows.ACL, rights windows.ACCESS_MASK) (bool, er
 	if dacl == nil {
 		return false, nil
 	}
+	token := windows.GetCurrentProcessToken()
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
 			return false, err
 		}
-		if isAccessDeniedACEType(ace.Header.AceType) && ace.Mask&rights != 0 {
+		if !isAccessDeniedACEType(ace.Header.AceType) || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		if ace.Header.AceSize < accessDeniedACEPrefixSize {
+			return false, fmt.Errorf("access-denied ACE %d is too small: %d bytes", i, ace.Header.AceSize)
+		}
+		if ace.Mask&rights == 0 {
+			continue
+		}
+		sid, err := accessDeniedACESID(unsafe.Pointer(ace), ace.Header)
+		if err != nil {
+			return false, fmt.Errorf("parse access-denied ACE %d: %w", i, err)
+		}
+		applies, err := denySIDApplies(token, sid)
+		if err != nil {
+			return false, fmt.Errorf("check access-denied ACE %d trustee: %w", i, err)
+		}
+		if applies {
 			return true, nil
 		}
 	}
 	return false, nil
 }
 
+func denySIDApplies(token windows.Token, sid *windows.SID) (bool, error) {
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return false, err
+	}
+	if user.User.Sid.Equals(sid) {
+		return true, nil
+	}
+	groups, err := token.GetTokenGroups()
+	if err != nil {
+		return false, err
+	}
+	for _, group := range groups.AllGroups() {
+		if group.Sid.Equals(sid) && denyGroupApplies(group.Attributes) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func denyGroupApplies(attributes uint32) bool {
+	return attributes&(windows.SE_GROUP_ENABLED|windows.SE_GROUP_USE_FOR_DENY_ONLY) != 0
+}
+
+func accessDeniedACESID(ace unsafe.Pointer, header windows.ACE_HEADER) (*windows.SID, error) {
+	sidOffset := accessDeniedACEPrefixSize
+	if header.AceType == accessDeniedObjectACEType || header.AceType == accessDeniedCallbackObjectACEType {
+		if header.AceSize < accessDeniedACEPrefixSize+accessDeniedObjectFlagsSize {
+			return nil, fmt.Errorf("object ACE is too small: %d bytes", header.AceSize)
+		}
+		flags := *(*uint32)(unsafe.Add(ace, accessDeniedACEPrefixSize))
+		sidOffset += accessDeniedObjectFlagsSize
+		if flags&windows.ACE_OBJECT_TYPE_PRESENT != 0 {
+			sidOffset += guidSize
+		}
+		if flags&windows.ACE_INHERITED_OBJECT_TYPE_PRESENT != 0 {
+			sidOffset += guidSize
+		}
+	}
+
+	aceSize := int(header.AceSize)
+	if sidOffset > aceSize-minimumSIDSize {
+		return nil, fmt.Errorf("ACE size %d does not contain a SID at offset %d", aceSize, sidOffset)
+	}
+	sidBytes := unsafe.Slice((*byte)(unsafe.Add(ace, sidOffset)), aceSize-sidOffset)
+	sidSize := minimumSIDSize + 4*int(sidBytes[1])
+	if sidSize > len(sidBytes) {
+		return nil, fmt.Errorf("SID size %d exceeds remaining ACE size %d", sidSize, len(sidBytes))
+	}
+	sid := (*windows.SID)(unsafe.Add(ace, sidOffset))
+	if !sid.IsValid() {
+		return nil, errors.New("ACE contains an invalid SID")
+	}
+	return sid, nil
+}
+
 func isAccessDeniedACEType(aceType uint8) bool {
 	// Standard, object, callback, and callback-object access-denied ACEs.
-	return aceType == windows.ACCESS_DENIED_ACE_TYPE || aceType == 6 || aceType == 10 || aceType == 12
+	return aceType == windows.ACCESS_DENIED_ACE_TYPE || aceType == accessDeniedObjectACEType || aceType == accessDeniedCallbackACEType || aceType == accessDeniedCallbackObjectACEType
 }
