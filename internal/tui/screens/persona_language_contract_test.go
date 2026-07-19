@@ -20,16 +20,23 @@ func TestPersonaOptionsIncludeGentlemanNeutralArtifacts(t *testing.T) {
 	}
 }
 
-func TestRenderPersonaDescribesGentlemanNeutralArtifacts(t *testing.T) {
-	out := RenderPersona(model.PersonaGentlemanNeutralArtifacts, 2)
-	for _, want := range []string{
-		"gentleman-neutral-artifacts",
-		"Gentleman conversation",
-		"English technical artifacts",
-		"context language",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("RenderPersona() missing %q; output:\n%s", want, out)
-		}
+func TestRenderPersonaDistinguishesConversationAndArtifactLanguage(t *testing.T) {
+	tests := []struct {
+		name    string
+		persona model.PersonaID
+		want    string
+	}{
+		{name: "Gentleman", persona: model.PersonaGentleman, want: "Voseo conversation; English technical artifacts"},
+		{name: "Gentleman with English artifacts", persona: model.PersonaGentlemanNeutralArtifacts, want: "Voseo conversation; English technical artifacts"},
+		{name: "Neutral", persona: model.PersonaNeutral, want: "No regional conversation tone; English technical artifacts"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := RenderPersona(tt.persona, 0)
+			if !strings.Contains(out, tt.want) {
+				t.Fatalf("RenderPersona() missing %q; output:\n%s", tt.want, out)
+			}
+		})
 	}
 }
