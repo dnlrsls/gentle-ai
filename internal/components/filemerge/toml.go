@@ -346,7 +346,12 @@ func RemoveTOMLTableTree(content, tableName string) string {
 	removing := false
 	var multilineQuote byte
 	removingMultilineValue := false
+	removingArrayDepth := 0
 	for _, line := range lines {
+		if removingArrayDepth > 0 {
+			advanceTOMLLexicalState(line, &multilineQuote, &removingArrayDepth)
+			continue
+		}
 		insideMultiline := multilineQuote != 0
 		advanceTOMLMultilineState(line, &multilineQuote)
 		if removingMultilineValue {
@@ -379,7 +384,13 @@ func RemoveTOMLTableTree(content, tableName string) string {
 			if keyPath, isAssignment := parseTOMLAssignmentKey(line); isAssignment {
 				fullPath := append(append([]string(nil), tablePath...), keyPath...)
 				if hasTOMLKeyPathPrefix(fullPath, target) {
-					removingMultilineValue = multilineQuote != 0
+					if equals := tomlIndexOutsideQuotes(line, '='); equals != -1 &&
+						strings.HasPrefix(strings.TrimSpace(line[equals+1:]), "[") {
+						var arrayQuote byte
+						advanceTOMLLexicalState(line[equals+1:], &arrayQuote, &removingArrayDepth)
+					} else {
+						removingMultilineValue = multilineQuote != 0
+					}
 					continue
 				}
 			}
@@ -490,6 +501,10 @@ func tomlIndexOutsideQuotes(text string, target byte) int {
 // multiline basic or literal string. Single-line strings and comments are
 // skipped so quote-like text in either cannot alter the lexical state.
 func advanceTOMLMultilineState(line string, multilineQuote *byte) {
+	advanceTOMLLexicalState(line, multilineQuote, nil)
+}
+
+func advanceTOMLLexicalState(line string, multilineQuote *byte, arrayDepth *int) {
 	var quote byte
 	for pos := 0; pos < len(line); {
 		char := line[pos]
@@ -533,6 +548,16 @@ func advanceTOMLMultilineState(line string, multilineQuote *byte) {
 		}
 		if char == '"' || char == '\'' {
 			quote = char
+		}
+		if arrayDepth != nil {
+			switch char {
+			case '[':
+				(*arrayDepth)++
+			case ']':
+				if *arrayDepth > 0 {
+					(*arrayDepth)--
+				}
+			}
 		}
 		pos++
 	}

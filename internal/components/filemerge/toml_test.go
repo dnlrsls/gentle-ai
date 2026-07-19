@@ -806,3 +806,34 @@ keep = true
 		})
 	}
 }
+
+func TestRemoveTOMLTableTreeRemovesMultilineArrayAssignment(t *testing.T) {
+	input := `permissions.gentle-dev.rules = ["""
+  ] multiline string bracket
+  """,
+  "[string bracket]",
+  # ] comment bracket
+  [
+    "nested",
+  ],
+]
+unrelated = [
+  "]",
+  # [ comment bracket
+  "keep",
+]
+[other]
+keep = true
+`
+	want := `unrelated = [
+  "]",
+  # [ comment bracket
+  "keep",
+]
+[other]
+keep = true
+`
+	if got := RemoveTOMLTableTree(input, "permissions.gentle-dev"); got != want {
+		t.Fatalf("RemoveTOMLTableTree() = %q, want %q", got, want)
+	}
+}
