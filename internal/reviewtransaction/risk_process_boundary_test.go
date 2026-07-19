@@ -63,41 +63,6 @@ func paddedPolicyModule(header []string, lines int) string {
 	return strings.Join(rendered[:lines], "\n") + "\n"
 }
 
-func TestHasProcessBoundaryContentUsesLanguageAgnosticIdentifiers(t *testing.T) {
-	tests := []struct {
-		name    string
-		path    string
-		content string
-		want    bool
-	}{
-		{name: "subprocess identifier", path: "a.py", content: "subprocess.run(argv)\n", want: true},
-		{name: "exec identifier", path: "a.rb", content: "exec(command)\n", want: true},
-		{name: "case insensitive identifier", path: "a.cs", content: "Exec(command);\n", want: true},
-		{name: "comment mention triggers conservatively", path: "a.go", content: "// never call exec directly\n", want: true},
-		{name: "subprocess identifier near miss", path: "a.py", content: "subprocessing.run(argv)\n", want: false},
-		{name: "exec identifier near miss", path: "a.ts", content: "executor.run(command)\n", want: false},
-		{name: "unsupported extension", path: "a.md", content: "Call subprocess.run with argv.\n", want: false},
-	}
-	for _, extension := range []string{
-		".c", ".cc", ".cpp", ".cs", ".go", ".h", ".hpp", ".java", ".js", ".jsx", ".kt",
-		".kts", ".php", ".py", ".rb", ".rs", ".sh", ".bash", ".zsh", ".ts", ".tsx",
-	} {
-		tests = append(tests, struct {
-			name    string
-			path    string
-			content string
-			want    bool
-		}{name: "supported " + extension, path: "runner" + extension, content: "exec(command)\n", want: true})
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := hasProcessBoundaryContent(tt.path, []byte(tt.content)); got != tt.want {
-				t.Fatalf("hasProcessBoundaryContent(%q, %q) = %t, want %t", tt.path, tt.content, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestAssessSnapshotRiskClassifiesUntrackedSubprocessWrapperHigh captures the
 // issue #1438 reproduction verbatim: 318 authored changed lines across four
 // untracked paths, one of them a subprocess.run wrapper, must classify high
@@ -214,6 +179,22 @@ func TestAssessSnapshotRiskProcessBoundaryNegativesAndDocumentedConservatism(t *
 			name:    "neutral module without spawn constructs stays medium",
 			path:    "tools/helper.py",
 			content: "def subprocess_helper(value):\n    return value\n",
+			want:    RiskMedium,
+		},
+		{
+			// Near-miss: "subprocess" as a prefix of a longer identifier must
+			// not satisfy the standalone-token boundary and never escalates.
+			name:    "subprocess prefix near-miss stays medium",
+			path:    "tools/runner.py",
+			content: "def run(argv):\n    return subprocessing.run(argv)\n",
+			want:    RiskMedium,
+		},
+		{
+			// Near-miss: "exec" as a prefix of a longer identifier must not
+			// satisfy the standalone-token boundary and never escalates.
+			name:    "exec prefix near-miss stays medium",
+			path:    "tools/runner.ts",
+			content: "function run(command) {\n  return executor.run(command);\n}\n",
 			want:    RiskMedium,
 		},
 		{

@@ -231,7 +231,6 @@ func (builder SnapshotBuilder) processBoundaryRiskReasons(ctx context.Context, s
 	if err != nil {
 		return nil, err
 	}
-	builder.Repo = repo
 	paths := make([]string, 0, len(stats))
 	for _, stat := range stats {
 		if isSemanticRiskEligible(stat) {
@@ -289,36 +288,6 @@ func (builder SnapshotBuilder) processBoundaryRiskReasons(ctx context.Context, s
 		}
 	}
 	return canonicalRiskReasons(reasons), nil
-}
-
-func (builder SnapshotBuilder) snapshotPathContent(ctx context.Context, tree, logicalPath string) ([]byte, bool, error) {
-	entry, err := runGit(ctx, builder.Repo, nil, nil, "ls-tree", "-z", tree, "--", literalPathspec(logicalPath))
-	if err != nil {
-		return nil, false, err
-	}
-	if len(entry) == 0 {
-		return nil, false, nil
-	}
-	content, err := runGit(ctx, builder.Repo, nil, nil, "show", tree+":"+logicalPath)
-	if err != nil {
-		return nil, false, err
-	}
-	return content, true, nil
-}
-
-func hasProcessBoundaryContent(logicalPath string, content []byte) bool {
-	if _, supported := semanticSourceExtensions[asciiLower(path.Ext(logicalPath))]; !supported {
-		return false
-	}
-	identifiers := bytes.FieldsFunc(content, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_')
-	})
-	for _, identifier := range identifiers {
-		if bytes.EqualFold(identifier, []byte("subprocess")) || bytes.EqualFold(identifier, []byte("exec")) {
-			return true
-		}
-	}
-	return false
 }
 
 func removeFallbackRiskReasons(reasons []RiskReason) []RiskReason {
