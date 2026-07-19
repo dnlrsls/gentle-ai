@@ -257,6 +257,31 @@ func TestRunArgsUninstallBypassesPlatformValidation(t *testing.T) {
 	// If we got here, uninstall bypassed the platform validation.
 }
 
+func TestRunArgsUninstallReportsBackupOnFailure(t *testing.T) {
+	home := t.TempDir()
+	setupMockHome(t, home)
+	t.Chdir(t.TempDir())
+
+	statePath := state.Path(home)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	err := RunArgs([]string{"uninstall", "--agent", "codex", "--yes"}, &output)
+	if err == nil || !strings.Contains(err.Error(), "read install state") {
+		t.Fatalf("RunArgs(uninstall) error = %v, want install state read failure", err)
+	}
+	for _, want := range []string{"Backup:", "Backup path:"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("RunArgs(uninstall) output missing %q:\n%s", want, output.String())
+		}
+	}
+}
+
 func TestRunArgsInstallHelpPrintsInstallSpecificHelp(t *testing.T) {
 	origEnsure := ensureCurrentOSSupported
 	t.Cleanup(func() { ensureCurrentOSSupported = origEnsure })

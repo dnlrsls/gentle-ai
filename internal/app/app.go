@@ -83,8 +83,7 @@ func RunArgs(args []string, stdout io.Writer) error {
 				_, err := cli.RunUninstallOpenCodePlugin(args[2:], stdout)
 				return err
 			}
-			_, err := cli.RunUninstall(args[1:], stdout)
-			return err
+			return runUninstall(args[1:], stdout)
 		case "skill-registry":
 			return runSkillRegistry(args[1:], stdout)
 		case "sdd-status":
@@ -243,20 +242,6 @@ func RunArgs(args []string, stdout io.Writer) error {
 
 		_, _ = fmt.Fprintln(stdout, cli.RenderSyncReport(syncResult))
 		return nil
-	case "uninstall":
-		uninstallResult, err := cli.RunUninstall(args[1:], stdout)
-		if err != nil {
-			// If a backup was created before the failure, surface it so
-			// the user can restore safely.
-			if uninstallResult.Manifest.ID != "" {
-				_, _ = fmt.Fprintln(stdout, cli.RenderUninstallReport(uninstallResult))
-			}
-			return err
-		}
-		if uninstallResult.Manifest.ID != "" {
-			_, _ = fmt.Fprintln(stdout, cli.RenderUninstallReport(uninstallResult))
-		}
-		return nil
 	case "restore":
 		return cli.RunRestore(args[1:], stdout)
 	case "doctor":
@@ -264,6 +249,14 @@ func RunArgs(args []string, stdout io.Writer) error {
 	default:
 		return fmt.Errorf("unknown command %q — run 'gentle-ai help' for available commands", args[0])
 	}
+}
+
+func runUninstall(args []string, stdout io.Writer) error {
+	result, err := cli.RunUninstall(args, stdout)
+	if result.Manifest.ID != "" {
+		_, _ = fmt.Fprintln(stdout, cli.RenderUninstallReport(result))
+	}
+	return err
 }
 
 func hasHelpFlag(args []string) bool {
