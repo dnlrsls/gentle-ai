@@ -412,18 +412,29 @@ func RemoveTopLevelTOMLKeyIfValue(content, key, rawValue string) string {
 	kept := make([]string, 0, len(lines))
 	topLevel := true
 	var multilineQuote byte
+	arrayDepth := 0
 	for _, line := range lines {
+		if topLevel && arrayDepth > 0 {
+			advanceTOMLLexicalState(line, &multilineQuote, &arrayDepth)
+			kept = append(kept, line)
+			continue
+		}
 		insideMultiline := multilineQuote != 0
 		advanceTOMLMultilineState(line, &multilineQuote)
 		if topLevel && !insideMultiline {
-			if strings.HasPrefix(strings.TrimSpace(line), "[") {
-				topLevel = false
-			} else if equals := tomlIndexOutsideQuotes(line, '='); equals != -1 {
+			code := tomlCodeBeforeComment(line)
+			if equals := tomlIndexOutsideQuotes(code, '='); equals != -1 {
 				keyPath, isKey := parseTOMLKeyPath(line[:equals])
 				if isKey && len(keyPath) == 1 && keyPath[0] == key &&
 					strings.TrimSpace(line[equals+1:]) == rawValue {
 					continue
 				}
+				if isKey && strings.HasPrefix(strings.TrimSpace(code[equals+1:]), "[") {
+					var arrayQuote byte
+					advanceTOMLLexicalState(line[equals+1:], &arrayQuote, &arrayDepth)
+				}
+			} else if strings.HasPrefix(strings.TrimSpace(line), "[") {
+				topLevel = false
 			}
 		}
 		kept = append(kept, line)

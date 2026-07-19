@@ -837,3 +837,35 @@ keep = true
 		t.Fatalf("RemoveTOMLTableTree() = %q, want %q", got, want)
 	}
 }
+
+func TestRemoveTopLevelTOMLKeysAfterNestedArray(t *testing.T) {
+	input := `matrix = [
+  ["[string bracket]"],
+  # ] comment bracket
+  [
+    "nested",
+  ],
+]
+approval_policy = "on-request"
+default_permissions = "gentle-dev"
+[other]
+approval_policy = "on-request"
+default_permissions = "gentle-dev"
+`
+	want := `matrix = [
+  ["[string bracket]"],
+  # ] comment bracket
+  [
+    "nested",
+  ],
+]
+[other]
+approval_policy = "on-request"
+default_permissions = "gentle-dev"
+`
+	got := RemoveTopLevelTOMLKeyIfValue(input, "approval_policy", "\"on-request\"")
+	got = RemoveTopLevelTOMLKeyIfValue(got, "default_permissions", "\"gentle-dev\"")
+	if got != want {
+		t.Fatalf("top-level cleanup = %q, want %q", got, want)
+	}
+}
