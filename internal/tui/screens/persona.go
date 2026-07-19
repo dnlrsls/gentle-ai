@@ -13,7 +13,7 @@ func PersonaOptions() []model.PersonaID {
 
 var personaDescriptions = map[model.PersonaID]string{
 	model.PersonaGentleman:                 "Voseo conversation; English technical artifacts",
-	model.PersonaGentlemanNeutralArtifacts: "Voseo conversation; English technical artifacts",
+	model.PersonaGentlemanNeutralArtifacts: "Voseo conversation; English technical artifacts (legacy alias)",
 	model.PersonaNeutral:                   "No regional conversation tone; English technical artifacts",
 	model.PersonaCustom:                    "Do not install a managed persona; choose themes/logo on the next screens",
 }
