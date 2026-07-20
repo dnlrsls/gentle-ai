@@ -75,7 +75,11 @@ func TestEnsureMaintenanceLockPathRejectsRelativePathWithoutHanging(t *testing.T
 }
 
 func TestEnsureMaintenanceLockPathAcceptsCanonicalAbsolutePath(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "gentle-ai", "review-transactions")
+	tempDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temporary directory symlinks: %v", err)
+	}
+	dir := filepath.Join(tempDir, "gentle-ai", "review-transactions")
 	path := filepath.Clean(filepath.Join(dir, "MAINTENANCE.lock"))
 	if err := ensureMaintenanceLockPath(path); err != nil {
 		t.Fatalf("canonical absolute maintenance lock path: %v", err)
