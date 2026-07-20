@@ -3,6 +3,7 @@ package reviewtransaction
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -64,6 +65,13 @@ func (fixture *chainedRecoveryFixture) extendWithSecondDelivery(t *testing.T) (C
 // authority; only gate binding may later compose the chain.
 func recoverApprovedCompactSuccessor(t *testing.T, repo, predecessorLineage, lineage string, generation int) (CompactState, CompactReceipt) {
 	t.Helper()
+	successor := newCompactTestState(t, repo, lineage)
+	successor.Generation = generation
+	return recoverApprovedCompactSuccessorState(t, repo, predecessorLineage, successor)
+}
+
+func recoverApprovedCompactSuccessorState(t *testing.T, repo, predecessorLineage string, successor CompactState) (CompactState, CompactReceipt) {
+	t.Helper()
 	predecessorStore, err := CompactAuthoritativeStore(context.Background(), repo, predecessorLineage)
 	if err != nil {
 		t.Fatal(err)
@@ -72,8 +80,6 @@ func recoverApprovedCompactSuccessor(t *testing.T, repo, predecessorLineage, lin
 	if err != nil {
 		t.Fatal(err)
 	}
-	successor := newCompactTestState(t, repo, lineage)
-	successor.Generation = generation
 	record, err := RecoverCompactAuthority(context.Background(), repo, CompactRecoveryRequest{
 		PredecessorLineageID: predecessorLineage, ExpectedPredecessorRevision: predecessorRecord.Revision,
 		Successor: successor, Disposition: RecoveryScopeChanged,
@@ -83,7 +89,7 @@ func recoverApprovedCompactSuccessor(t *testing.T, repo, predecessorLineage, lin
 		t.Fatal(err)
 	}
 	state := record.State
-	store, err := CompactAuthoritativeStore(context.Background(), repo, lineage)
+	store, err := CompactAuthoritativeStore(context.Background(), repo, successor.LineageID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +118,133 @@ func recoverApprovedCompactSuccessor(t *testing.T, repo, predecessorLineage, lin
 		t.Fatal(err)
 	}
 	return state, receipt
+}
+
+func overlappingRecoveryFixture(t *testing.T) *chainedRecoveryFixture {
+	t.Helper()
+	repo := initSnapshotRepo(t)
+	branch := currentBranch(context.Background(), repo)
+	remote := configurePublicationRemote(t, repo, branch)
+	gitSnapshot(t, repo, "config", "branch."+branch+".remote", "origin")
+	gitSnapshot(t, repo, "config", "branch."+branch+".merge", "refs/heads/"+branch)
+	base := strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD"))
+
+	writeSnapshotFile(t, repo, "tracked.txt", "intermediate\n")
+	gitSnapshot(t, repo, "add", "tracked.txt")
+	gitSnapshot(t, repo, "commit", "-m", "intermediate boundary")
+	intermediate := strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD"))
+
+	writeSnapshotFile(t, repo, "deleted.txt", "final reviewed content\n")
+	gitSnapshot(t, repo, "add", "deleted.txt")
+	gitSnapshot(t, repo, "commit", "-m", "final reviewed candidate")
+
+	root := newCompactStartStateForTarget(t, repo, "overlapping-recovery-root", Target{
+		Kind: TargetBaseDiff, BaseRef: base, IntendedUntracked: []string{},
+	})
+	root, _ = persistApprovedCompactState(t, repo, root)
+	successor := newCompactStartStateForTarget(t, repo, "overlapping-recovery-leaf", Target{
+		Kind: TargetBaseDiff, BaseRef: intermediate, IntendedUntracked: []string{},
+	})
+	successor.Generation = 2
+	leaf, receipt := recoverApprovedCompactSuccessorState(t, repo, root.LineageID, successor)
+	rootStore, err := CompactAuthoritativeStore(context.Background(), repo, root.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &chainedRecoveryFixture{
+		repo: repo, remote: remote, branch: branch, baseRef: "origin/" + branch,
+		root: root, rootStore: rootStore, leaf: leaf, receipt: receipt,
+	}
+}
+
+func TestCompactPrePRRecoveryChainPreservesCumulativeAuthority(t *testing.T) {
+	fixture := overlappingRecoveryFixture(t)
+	binding, ok, err := deriveCompactRecoveryBinding(context.Background(), fixture.repo, fixture.leaf)
+	if err != nil || !ok {
+		t.Fatalf("derive overlapping scope recovery binding: ok=%t err=%v", ok, err)
+	}
+	if binding.BaseTree != fixture.root.InitialSnapshot.BaseTree ||
+		!equalStrings(binding.GenesisPaths, fixture.root.GenesisPaths) || len(binding.Members) != 2 {
+		t.Fatalf("overlapping scope recovery binding = %#v", binding)
+	}
+	got := EvaluateCompactGate(context.Background(), fixture.repo, fixture.receipt, NativeGateRequestInput{
+		Gate: GatePrePR, LineageID: fixture.leaf.LineageID, BaseRef: fixture.baseRef,
+	})
+	if got.Result != GateAllow || !got.Context.BaseRelationshipValid || got.Context.Denial != nil {
+		t.Fatalf("overlapping scope recovery pre-pr = %#v", got)
+	}
+	got = EvaluateCompactGate(context.Background(), fixture.repo, fixture.receipt, NativeGateRequestInput{
+		Gate: GatePrePush, LineageID: fixture.leaf.LineageID, BaseRef: fixture.baseRef,
+	})
+	if got.Result != GateAllow || !got.Context.BaseRelationshipValid || got.Context.Denial != nil {
+		t.Fatalf("overlapping scope recovery pre-push = %#v", got)
+	}
+}
+
+func TestCompactOverlappingRecoveryRebindRejectsScopeOutsideCumulativeAuthority(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	branch := currentBranch(context.Background(), repo)
+	configurePublicationRemote(t, repo, branch)
+	base := strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD"))
+	writeSnapshotFile(t, repo, "transient.txt", "outside cumulative authority\n")
+	gitSnapshot(t, repo, "add", "transient.txt")
+	gitSnapshot(t, repo, "commit", "-m", "transient intermediate path")
+	intermediate := strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD"))
+	if err := os.Remove(filepath.Join(repo, "transient.txt")); err != nil {
+		t.Fatal(err)
+	}
+	writeSnapshotFile(t, repo, "deleted.txt", "final reviewed content\n")
+	gitSnapshot(t, repo, "add", "-A")
+	gitSnapshot(t, repo, "commit", "-m", "final reviewed candidate")
+
+	root := newCompactStartStateForTarget(t, repo, "overlap-outside-root", Target{Kind: TargetBaseDiff, BaseRef: base, IntendedUntracked: []string{}})
+	root, _ = persistApprovedCompactState(t, repo, root)
+	successor := newCompactStartStateForTarget(t, repo, "overlap-outside-leaf", Target{Kind: TargetBaseDiff, BaseRef: intermediate, IntendedUntracked: []string{}})
+	successor.Generation = 2
+	leaf, receipt := recoverApprovedCompactSuccessorState(t, repo, root.LineageID, successor)
+	if _, ok, err := deriveCompactRecoveryBinding(context.Background(), repo, leaf); err != nil || ok {
+		t.Fatalf("outside-scope overlap binding: ok=%t err=%v", ok, err)
+	}
+	got := EvaluateCompactGate(context.Background(), repo, receipt, NativeGateRequestInput{
+		Gate: GatePrePR, LineageID: leaf.LineageID, BaseRef: "origin/" + branch,
+	})
+	if got.Result == GateAllow {
+		t.Fatalf("outside-scope overlap rebind = %#v", got)
+	}
+}
+
+func TestCompactOverlappingRecoveryRebindRejectsBaseOutsidePublicationAncestry(t *testing.T) {
+	repo := initSnapshotRepo(t)
+	branch := currentBranch(context.Background(), repo)
+	configurePublicationRemote(t, repo, branch)
+	base := strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD"))
+	gitSnapshot(t, repo, "checkout", "-b", "unpublished-recovery-base")
+	writeSnapshotFile(t, repo, "tracked.txt", "unpublished base\n")
+	gitSnapshot(t, repo, "add", "tracked.txt")
+	gitSnapshot(t, repo, "commit", "-m", "unpublished recovery base")
+	unpublishedBase := strings.TrimSpace(gitSnapshot(t, repo, "rev-parse", "HEAD"))
+	gitSnapshot(t, repo, "checkout", branch)
+	writeSnapshotFile(t, repo, "tracked.txt", "published intermediate\n")
+	gitSnapshot(t, repo, "add", "tracked.txt")
+	gitSnapshot(t, repo, "commit", "-m", "published intermediate")
+	writeSnapshotFile(t, repo, "deleted.txt", "final reviewed content\n")
+	gitSnapshot(t, repo, "add", "deleted.txt")
+	gitSnapshot(t, repo, "commit", "-m", "final reviewed candidate")
+
+	root := newCompactStartStateForTarget(t, repo, "overlap-order-root", Target{Kind: TargetBaseDiff, BaseRef: base, IntendedUntracked: []string{}})
+	root, _ = persistApprovedCompactState(t, repo, root)
+	successor := newCompactStartStateForTarget(t, repo, "overlap-order-leaf", Target{Kind: TargetBaseDiff, BaseRef: unpublishedBase, IntendedUntracked: []string{}})
+	successor.Generation = 2
+	leaf, receipt := recoverApprovedCompactSuccessorState(t, repo, root.LineageID, successor)
+	if _, ok, err := deriveCompactRecoveryBinding(context.Background(), repo, leaf); err != nil || !ok {
+		t.Fatalf("immutable off-ancestry overlap binding: ok=%t err=%v", ok, err)
+	}
+	got := EvaluateCompactGate(context.Background(), repo, receipt, NativeGateRequestInput{
+		Gate: GatePrePR, LineageID: leaf.LineageID, BaseRef: "origin/" + branch,
+	})
+	if got.Result == GateAllow {
+		t.Fatalf("off-ancestry overlap rebind = %#v", got)
+	}
 }
 
 func TestCompactPrePushBindsChainedScopeRecoveryDelivery(t *testing.T) {
@@ -211,14 +344,34 @@ func TestCompactPrePushDeriveFailureCarriesReceiptDenialContext(t *testing.T) {
 
 func TestCompactChainedRecoveryRebindFailsClosedWithoutBoundPredecessorReceipt(t *testing.T) {
 	fixture := chainedScopeRecoveryFixture(t)
-	if err := os.Remove(fixture.rootStore.ReceiptPath()); err != nil {
-		t.Fatal(err)
-	}
+	original := finalCompactGateAllowHook
+	t.Cleanup(func() { finalCompactGateAllowHook = original })
+	finalCompactGateAllowHook = func() { _ = os.Remove(fixture.rootStore.ReceiptPath()) }
 	got := EvaluateCompactGate(context.Background(), fixture.repo, fixture.receipt, NativeGateRequestInput{
 		Gate: GatePrePush, LineageID: fixture.leaf.LineageID, BaseRef: fixture.baseRef,
 	})
 	if got.Result == GateAllow {
 		t.Fatalf("receiptless predecessor rebind = %#v", got)
+	}
+}
+
+func TestCompactRecoveryDirectLeafRejectsUnreviewedChangeRevert(t *testing.T) {
+	fixture := chainedScopeRecoveryFixture(t)
+	gitSnapshot(t, fixture.repo, "push", "origin", "HEAD:"+fixture.branch)
+	state, receipt := fixture.extendWithSecondDelivery(t)
+	writeSnapshotFile(t, fixture.repo, "outside.txt", "unreviewed\n")
+	gitSnapshot(t, fixture.repo, "add", "outside.txt")
+	gitSnapshot(t, fixture.repo, "commit", "-m", "unreviewed intermediate")
+	if err := os.Remove(filepath.Join(fixture.repo, "outside.txt")); err != nil {
+		t.Fatal(err)
+	}
+	gitSnapshot(t, fixture.repo, "add", "-A")
+	gitSnapshot(t, fixture.repo, "commit", "-m", "revert unreviewed intermediate")
+	got := EvaluateCompactGate(context.Background(), fixture.repo, receipt, NativeGateRequestInput{
+		Gate: GatePrePR, LineageID: state.LineageID, BaseRef: fixture.baseRef,
+	})
+	if got.Result == GateAllow {
+		t.Fatalf("direct leaf with unreviewed change/revert = %#v", got)
 	}
 }
 

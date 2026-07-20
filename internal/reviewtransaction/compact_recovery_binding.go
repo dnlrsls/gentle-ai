@@ -17,14 +17,16 @@ const CompactRecoveryBindingDomain = "gentle-ai.compact-recovery-binding/v1"
 // unbroken scope_changed recovery chain. Recovery successors always start as
 // pristine reviewing authorities, so a successor created after its
 // predecessor's delivery was committed can never restate the original base
-// tree, genesis paths, or fix delta on its own. The binding restores exactly
-// those gate inputs from the persisted, receipt-bound predecessors without
-// ever mutating any authority. It is derived gate evidence only.
+// tree, genesis paths, or fix delta on its own. A successor may also re-review
+// an exact suffix of its predecessor's candidate when that suffix is wholly
+// inside predecessor genesis. The binding restores exactly those gate inputs
+// from the persisted, receipt-bound predecessors without ever mutating any
+// authority. It is derived gate evidence only.
 type compactRecoveryBinding struct {
 	// Members are ordered root..leaf. Every member is a terminally approved
 	// compact authority whose receipt file matches its state, and every edge
-	// is a validated scope_changed recovery whose successor initial base tree
-	// equals its predecessor's final candidate tree.
+	// is a validated scope_changed recovery with either exact tree continuity
+	// or a Git-verified, scope-contracting overlap ending at the same candidate.
 	Members []CompactRecord
 	// BaseTree is the root member's reviewed delivery base.
 	BaseTree string
@@ -69,10 +71,22 @@ func deriveCompactRecoveryBinding(ctx context.Context, repo string, leaf Compact
 		if edgeErr := validateCompactRecoveryEdge(predecessor, current); edgeErr != nil {
 			return compactRecoveryBinding{}, false, edgeErr
 		}
-		if predecessor.State.State != StateApproved ||
-			current.InitialSnapshot.BaseTree != predecessor.State.CurrentSnapshot.CandidateTree ||
-			!compactRecoveryReceiptBound(store, predecessor) {
+		continuous := current.InitialSnapshot.BaseTree == predecessor.State.CurrentSnapshot.CandidateTree
+		overlapping := compactOverlappingRecoveryMember(predecessor.State, current)
+		if overlapping {
+			builder := SnapshotBuilder{Repo: repo}
+			if evidenceErr := builder.ValidateEvidence(ctx, predecessor.State.CurrentSnapshot); evidenceErr != nil {
+				return compactRecoveryBinding{}, false, evidenceErr
+			}
+			if evidenceErr := builder.ValidateEvidence(ctx, current.InitialSnapshot); evidenceErr != nil {
+				return compactRecoveryBinding{}, false, evidenceErr
+			}
+		}
+		if predecessor.State.State != StateApproved || (!continuous && !overlapping) {
 			break
+		}
+		if !compactRecoveryReceiptBound(store, predecessor) {
+			return compactRecoveryBinding{}, false, errors.New("recovery predecessor receipt does not match authority")
 		}
 		members = append([]CompactRecord{predecessor}, members...)
 		current = predecessor.State
@@ -94,6 +108,15 @@ func deriveCompactRecoveryBinding(ctx context.Context, repo string, leaf Compact
 		Members: members, BaseTree: members[0].State.InitialSnapshot.BaseTree,
 		GenesisPaths: union, FixDeltaHash: compactRecoveryBindingValuesHash("fix-delta", fixDeltas),
 	}, true, nil
+}
+
+func compactOverlappingRecoveryMember(predecessor, successor CompactState) bool {
+	return successor.State == StateApproved &&
+		snapshotsEqual(successor.InitialSnapshot, successor.CurrentSnapshot) &&
+		successor.InitialSnapshot.BaseTree != predecessor.CurrentSnapshot.CandidateTree &&
+		successor.InitialSnapshot.CandidateTree == predecessor.CurrentSnapshot.CandidateTree &&
+		len(successor.GenesisPaths) > 0 &&
+		pathsAreSubset(successor.GenesisPaths, predecessor.GenesisPaths) == nil
 }
 
 // compactRecoveryReceiptBound reports whether the persisted receipt file of a
@@ -142,9 +165,14 @@ func verifyCompactRecoveryDelivery(ctx context.Context, repo string, binding com
 		return err
 	}
 	previousTree, previousIndex := baseTree, -1
-	for _, member := range binding.Members {
+	for memberIndex, member := range binding.Members {
 		memberFinal := member.State.CurrentSnapshot.CandidateTree
 		if memberFinal == previousTree {
+			if member.State.InitialSnapshot.BaseTree != previousTree {
+				if err := verifyCompactOverlappingRecoveryMember(ctx, builder, commits, previousIndex, member.State); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		boundary := -1
@@ -153,6 +181,11 @@ func verifyCompactRecoveryDelivery(ctx context.Context, repo string, binding com
 				continue
 			}
 			if commits[index].Tree != memberFinal {
+				if memberIndex+1 < len(binding.Members) &&
+					compactOverlappingRecoveryMember(member.State, binding.Members[memberIndex+1].State) &&
+					commits[index].Tree == binding.Members[memberIndex+1].State.InitialSnapshot.BaseTree {
+					continue
+				}
 				return errors.New("publication commit does not match the recovery chain boundary")
 			}
 			boundary = index
@@ -182,6 +215,35 @@ func verifyCompactRecoveryDelivery(ctx context.Context, repo string, binding com
 	}
 	if previousTree != finalTree {
 		return errors.New("recovery chain final tree does not equal the delivered candidate")
+	}
+	return nil
+}
+
+func verifyCompactOverlappingRecoveryMember(ctx context.Context, builder SnapshotBuilder, commits []compactPrePRChainCommitProof, finalIndex int, member CompactState) error {
+	boundary := -1
+	for index := 0; index <= finalIndex; index++ {
+		if commits[index].ParentTree != member.InitialSnapshot.BaseTree {
+			continue
+		}
+		if boundary >= 0 {
+			return errors.New("overlapping recovery base tree is ambiguous in publication history")
+		}
+		boundary = index
+	}
+	if boundary < 0 {
+		return errors.New("overlapping recovery base tree is absent from publication history")
+	}
+	touched := []string{}
+	for index := boundary; index <= finalIndex; index++ {
+		paths, err := builder.changedPaths(ctx, commits[index].ParentTree, commits[index].Tree)
+		if err != nil {
+			return err
+		}
+		touched = append(touched, paths...)
+	}
+	touched, err := compactPrePRPathUnion(touched)
+	if err != nil || pathsAreSubset(touched, member.GenesisPaths) != nil {
+		return errors.New("overlapping recovery suffix exceeds the member's immutable genesis paths")
 	}
 	return nil
 }

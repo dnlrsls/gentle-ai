@@ -154,7 +154,9 @@ func (err *reviewFacadeOperationProgressError) record(lineage, revision string) 
 	}
 }
 
-var writeCompactFacadeReceipt = reviewtransaction.WriteCompactReceiptAtomic
+var writeCompactFacadeReceipt = func(ctx context.Context, store reviewtransaction.CompactStore, receipt reviewtransaction.CompactReceipt) error {
+	return store.WriteReceipt(ctx, receipt)
+}
 var reviewFacadeSyncDirectory = reviewtransaction.SyncReviewDirectory
 var reviewRecoverBeforePersist = func() {}
 
@@ -224,7 +226,7 @@ var reviewFacadeCommittedTransitionHook = func(context.Context, string, string, 
 
 func RunReview(args []string, stdout io.Writer) error {
 	if len(args) == 0 || args[0] == "help" || args[0] == "-h" || args[0] == "--help" {
-		_, _ = fmt.Fprintln(stdout, "Usage: gentle-ai review <capabilities|start|finalize|validate|status|invalidate|recover|reclaim|reconcile-authority|schema|bind-sdd> [flags]\n\nOrdinary review facade; repository scope, authority, canonical artifacts, and lifecycle transitions are derived by Go.")
+		_, _ = fmt.Fprintln(stdout, "Usage: gentle-ai review <capabilities|start|finalize|validate|status|invalidate|abandon|recover|reclaim|reconcile-authority|dispose-result|quarantine-legacy|repair-legacy-alias|schema|bind-sdd> [flags]\n\nOrdinary review facade; repository scope, authority, canonical artifacts, and lifecycle transitions are derived by Go.")
 		_, _ = fmt.Fprintln(stdout, "Additive headless capabilities: gentle-ai review capture-result (with --preflight) and gentle-ai review preserve-result.")
 		return nil
 	}
@@ -307,12 +309,20 @@ func runReviewCommand(args []string, stdout io.Writer) error {
 		return RunReviewStatus(args[1:], stdout)
 	case "invalidate":
 		return RunReviewInvalidate(args[1:], stdout)
+	case "abandon":
+		return RunReviewAbandon(args[1:], stdout)
 	case "recover":
 		return RunReviewRecover(args[1:], stdout)
 	case "reclaim":
 		return RunReviewReclaim(args[1:], stdout)
 	case "reconcile-authority":
 		return RunReviewReconcileAuthority(args[1:], stdout)
+	case "dispose-result":
+		return RunReviewDisposeResult(args[1:], stdout)
+	case "quarantine-legacy":
+		return RunReviewLegacyQuarantine(args[1:], stdout)
+	case "repair-legacy-alias":
+		return RunReviewLegacyAliasRepair(args[1:], stdout)
 	case "schema":
 		return RunReviewSchema(args[1:], stdout)
 	case "bind-sdd":
@@ -575,11 +585,20 @@ func runReviewBindSDD(ctx context.Context, args []string, stdout io.Writer) erro
 }
 
 func RunReviewInvalidate(args []string, stdout io.Writer) error {
-	flags := newReviewFlagSet("review invalidate", stdout, "Terminally invalidate one explicit pristine reviewing authority.")
+	flags := newReviewFlagSet("review invalidate", stdout, "Terminally invalidate one explicit pristine reviewing authority, or an approved compact authority whose lifecycle gate natively re-derives invalidated under LOCK.")
 	cwd := flags.String("cwd", "", "repository path")
 	lineage := flags.String("lineage", "", "explicit review lineage identifier")
 	expected := flags.String("expected-revision", "", "exact current authority revision")
-	reason := flags.String("reason", "", "non-empty terminal invalidation reason")
+	reason := flags.String("reason", "", "non-empty terminal invalidation reason for a pristine reviewing authority")
+	gate := flags.String("gate", "", "approved-authority lifecycle gate: post-apply, pre-commit, pre-push, pre-pr, or release")
+	baseRef := flags.String("base-ref", "", "optional expected remote publication base for pre-push or pre-pr")
+	ciAttestation := flags.String("pre-pr-ci-attestation", "", "signed exact-merged-tree CI attestation for a compatible base advance")
+	policy := flags.String("policy", "", "explicit custom policy containing compatible-base CI trust")
+	releaseConfiguration := flags.String("release-configuration", "", "release configuration artifact")
+	releaseGenerated := flags.String("release-generated", "", "generated artifact manifest")
+	releaseProvenance := flags.String("release-provenance", "", "release provenance artifact")
+	releaseBoundary := flags.String("release-publication-boundary", "", "sealed publication boundary artifact")
+	releaseFreshness := flags.String("release-evidence-freshness", "", "current release evidence freshness artifact")
 	if err := parseReviewFlags(flags, args); err != nil {
 		return err
 	}
@@ -589,8 +608,8 @@ func RunReviewInvalidate(args []string, stdout io.Writer) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected review invalidate argument %q", flags.Arg(0))
 	}
-	if strings.TrimSpace(*cwd) == "" || strings.TrimSpace(*lineage) == "" || strings.TrimSpace(*expected) == "" || strings.TrimSpace(*reason) == "" {
-		return errors.New("review invalidate requires --cwd, --lineage, --expected-revision, and --reason")
+	if strings.TrimSpace(*cwd) == "" || strings.TrimSpace(*lineage) == "" || strings.TrimSpace(*expected) == "" {
+		return errors.New("review invalidate requires --cwd, --lineage, and --expected-revision")
 	}
 	root, err := (reviewtransaction.SnapshotBuilder{Repo: *cwd}).ResolveRepositoryRoot(context.Background())
 	if err != nil {
@@ -608,6 +627,32 @@ func RunReviewInvalidate(args []string, stdout io.Writer) error {
 				return errors.New("review authority is ambiguous across compact v2 and legacy v1 stores")
 			}
 		}
+		approvedInvalidation := record.State.State == reviewtransaction.StateApproved ||
+			record.State.State == reviewtransaction.StateInvalidated && record.State.InvalidationEvidence != nil
+		if approvedInvalidation {
+			if strings.TrimSpace(*gate) == "" {
+				return errors.New("approved review invalidation requires --gate")
+			}
+			input := reviewtransaction.NativeGateRequestInput{
+				Gate: reviewtransaction.GateKind(*gate), LineageID: *lineage, BaseRef: *baseRef,
+				PrePRCIAttestation: *ciAttestation, ReleaseConfiguration: *releaseConfiguration,
+				ReleaseGenerated: *releaseGenerated, ReleaseProvenance: *releaseProvenance,
+				ReleasePublicationBoundary: *releaseBoundary, ReleaseEvidenceFreshness: *releaseFreshness,
+			}
+			if strings.TrimSpace(*ciAttestation) != "" {
+				input.PolicyArtifact = *policy
+			}
+			invalidated, _, err := reviewtransaction.InvalidateApprovedCompactAuthority(context.Background(), root, reviewtransaction.CompactApprovedInvalidationRequest{
+				LineageID: *lineage, ExpectedRevision: *expected, Gate: input,
+			})
+			if err != nil {
+				return err
+			}
+			return encodeReviewJSON(stdout, ReviewInvalidateResult{Operation: "review/invalidate", LineageID: invalidated.State.LineageID, State: invalidated.State.State, StoreRevision: invalidated.Revision})
+		}
+		if strings.TrimSpace(*reason) == "" {
+			return errors.New("pristine review invalidation requires --reason")
+		}
 		state := record.State
 		if state.State != reviewtransaction.StateInvalidated || state.InvalidationReason != strings.TrimSpace(*reason) {
 			if err := state.Invalidate(*reason); err != nil {
@@ -622,6 +667,9 @@ func RunReviewInvalidate(args []string, stdout io.Writer) error {
 	}
 	if !errors.Is(loadErr, os.ErrNotExist) {
 		return fmt.Errorf("load explicit compact review lineage: %w", loadErr)
+	}
+	if strings.TrimSpace(*reason) == "" {
+		return errors.New("legacy review invalidation requires --reason")
 	}
 	legacy, err := reviewtransaction.AuthoritativeStore(context.Background(), root, *lineage)
 	if err != nil {
@@ -1038,7 +1086,7 @@ func runReviewFacadeFinalize(ctx context.Context, args []string, stdout io.Write
 			return err
 		}
 	}
-	if err := writeCompactFacadeReceipt(store.ReceiptPath(), receipt); err != nil {
+	if err := writeCompactFacadeReceipt(ctx, store, receipt); err != nil {
 		return newFacadeReceiptPublicationError(state.LineageID, requestDigest, err)
 	}
 	published, err := inspectCompactFacadeReceipt(store.ReceiptPath(), receipt)
@@ -1457,7 +1505,7 @@ func discoverCompactFacadeGateReview(ctx context.Context, repo, lineage string, 
 					StoreRevision: record.Revision, GenesisRevision: record.Revision, ChainIdentity: record.Revision, BundleDigest: record.Revision,
 					BaseTree: assessment.Actual.BaseTree, CandidateTree: assessment.Actual.CandidateTree, PathsDigest: assessment.Actual.PathsDigest,
 					FixDeltaHash: record.State.FixDeltaHash, PolicyHash: record.State.PolicyHash,
-					LedgerHash: reviewtransaction.EmptyFixDeltaHash, EvidenceHash: record.State.EvidenceHash,
+					LedgerHash: record.State.LedgerHash(), EvidenceHash: record.State.EvidenceHash,
 					Denial: &reviewtransaction.GateDenial{Stage: "receipt-binding", Code: "candidate-or-paths-mismatch"}, ScopeChange: &diagnostics,
 				},
 			})
@@ -1503,15 +1551,17 @@ func discoverCompactFacadeGateReview(ctx context.Context, repo, lineage string, 
 
 // reviewAuthorityCorruptionConfinedToLegacyEntries reports whether every cause
 // of a non-authoritative inventory is an invalid legacy-v1 entry, which can
-// never resolve as a compact discovery candidate. Inventory IO/layout
-// diagnostics, ambiguous locks, reset residue, mixed-store collisions, and any
-// compact-v2 problem keep lineage-less discovery fail-closed.
+// never resolve as a compact discovery candidate. Ambiguous lock residue is
+// tolerated only when it belongs to such an already-invalid legacy entry;
+// inventory IO/layout diagnostics, shared or live-entry ambiguous locks, reset
+// residue, mixed-store collisions, and any compact-v2 problem keep
+// lineage-less discovery fail-closed.
 func reviewAuthorityCorruptionConfinedToLegacyEntries(report reviewtransaction.AuthorityStatusReport, inventoryErr error) bool {
 	if inventoryErr != nil || len(report.Diagnostics) > 0 {
 		return false
 	}
 	for _, lock := range report.Locks {
-		if lock.Status == reviewtransaction.AuthorityLockAmbiguous {
+		if lock.Status == reviewtransaction.AuthorityLockAmbiguous && !reviewAmbiguousLockConfinedToInvalidLegacyEntry(report, lock) {
 			return false
 		}
 	}
@@ -1523,11 +1573,29 @@ func reviewAuthorityCorruptionConfinedToLegacyEntries(report reviewtransaction.A
 				return false
 			}
 			confined = true
-		case reviewtransaction.AuthorityStatusReset, reviewtransaction.AuthorityStatusCollision:
+		case reviewtransaction.AuthorityStatusIncomplete, reviewtransaction.AuthorityStatusReset, reviewtransaction.AuthorityStatusCollision:
 			return false
 		}
 	}
 	return confined
+}
+
+// reviewAmbiguousLockConfinedToInvalidLegacyEntry reports whether ambiguous
+// lock evidence is part of the corruption of a legacy-v1 lineage entry that
+// the inventory has already classified invalid. Only that residue is confined:
+// the shared compact-v2 store lock carries no owning lineage, and any lock
+// attached to a live, historical, collided, or missing entry stays a
+// fail-closed corruption cause because it may still guard real authority.
+func reviewAmbiguousLockConfinedToInvalidLegacyEntry(report reviewtransaction.AuthorityStatusReport, lock reviewtransaction.AuthorityLockEvidence) bool {
+	if lock.Version != reviewtransaction.AuthorityVersionLegacy || strings.TrimSpace(lock.LineageID) == "" {
+		return false
+	}
+	for _, entry := range report.Entries {
+		if entry.Version == reviewtransaction.AuthorityVersionLegacy && entry.LineageID == lock.LineageID {
+			return entry.Status == reviewtransaction.AuthorityStatusInvalid
+		}
+	}
+	return false
 }
 
 func reviewAuthorityCauseCategory(report reviewtransaction.AuthorityStatusReport, inventoryErr error) string {
@@ -1535,7 +1603,7 @@ func reviewAuthorityCauseCategory(report reviewtransaction.AuthorityStatusReport
 		return "inventory_io_or_layout"
 	}
 	for _, lock := range report.Locks {
-		if lock.Status == reviewtransaction.AuthorityLockAmbiguous {
+		if lock.Status == reviewtransaction.AuthorityLockAmbiguous && !reviewAmbiguousLockConfinedToInvalidLegacyEntry(report, lock) {
 			return "lock_ambiguous"
 		}
 	}
