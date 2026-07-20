@@ -354,6 +354,110 @@ func TestReviewPreserveResultRecordsIncidentClass(t *testing.T) {
 	})
 }
 
+// TestReviewPreserveResultDuplicateRecoveryIsIdempotent pins scenario 6
+// (duplicate recovery): recovery is defined as relaunching the identical
+// GENTLE_AI_REVIEW_BINDING and replaying its capture. A second identical
+// recovery capture for the same slot must be idempotent through the existing
+// store-lock + CAS in CaptureReviewerResult, with no new revision minted.
+func TestReviewPreserveResultDuplicateRecoveryIsIdempotent(t *testing.T) {
+	repo, started, store, record := newArtifactReview(t, false)
+	rawInput := filepath.Join(t.TempDir(), "raw.txt")
+	if err := os.WriteFile(rawInput, []byte("raw reviewer output\nthat is not JSON"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var preserved bytes.Buffer
+	if err := RunReviewPreserveResult([]string{
+		"--cwd", repo, "--lineage", started.LineageID, "--target", record.State.InitialSnapshot.Identity,
+		"--lens", record.State.SelectedLenses[0], "--order", "0", "--input", rawInput, "--class", "empty_result",
+	}, &preserved); err != nil {
+		t.Fatalf("preserve incident failed: %v", err)
+	}
+	var incident reviewIncidentArtifact
+	decodeStrictReviewJSON(t, preserved.Bytes(), &incident)
+	if incident.Class != reviewtransaction.ResultIncidentEmptyResult {
+		t.Fatalf("incident Class = %q, want %q", incident.Class, reviewtransaction.ResultIncidentEmptyResult)
+	}
+
+	extractedInput := filepath.Join(t.TempDir(), "extracted.json")
+	if err := os.WriteFile(extractedInput, []byte(`{"findings":[],"evidence":["checked exact target"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	captureArgs := []string{
+		"--cwd", repo, "--lineage", started.LineageID, "--target", record.State.InitialSnapshot.Identity,
+		"--lens", record.State.SelectedLenses[0], "--order", "0", "--input", extractedInput,
+	}
+	before, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first, second bytes.Buffer
+	if err := RunReviewCaptureResult(captureArgs, &first); err != nil {
+		t.Fatalf("first recovery capture failed: %v", err)
+	}
+	if err := RunReviewCaptureResult(captureArgs, &second); err != nil {
+		t.Fatalf("duplicate recovery capture failed: %v", err)
+	}
+	if first.String() != second.String() {
+		t.Fatalf("duplicate recovery capture produced different manifest bytes:\nfirst=%q\nsecond=%q", first.String(), second.String())
+	}
+	after, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Revision != before.Revision {
+		t.Fatalf("duplicate recovery capture bumped the review authority revision: %q -> %q", before.Revision, after.Revision)
+	}
+}
+
+// TestReviewPreserveResultInterruptedRecoveryRetries pins scenario 7
+// (interrupted recovery): a recovery capture that fails partway (rejected
+// payload) must not consume or corrupt the slot, so a subsequent retry of the
+// identical binding with the correct extracted payload succeeds and finalizes.
+func TestReviewPreserveResultInterruptedRecoveryRetries(t *testing.T) {
+	repo, started, _, record := newArtifactReview(t, false)
+	rawInput := filepath.Join(t.TempDir(), "raw.txt")
+	if err := os.WriteFile(rawInput, []byte("raw reviewer output\nthat is not JSON"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunReviewPreserveResult([]string{
+		"--cwd", repo, "--lineage", started.LineageID, "--target", record.State.InitialSnapshot.Identity,
+		"--lens", record.State.SelectedLenses[0], "--order", "0", "--input", rawInput,
+	}, io.Discard); err != nil {
+		t.Fatalf("preserve failed: %v", err)
+	}
+
+	captureArgs := func(input string) []string {
+		return []string{
+			"--cwd", repo, "--lineage", started.LineageID, "--target", record.State.InitialSnapshot.Identity,
+			"--lens", record.State.SelectedLenses[0], "--order", "0", "--input", input,
+		}
+	}
+	// Simulate an interrupted recovery relaunch: the first attempt replays an
+	// incomplete payload (missing the required evidence array) and fails
+	// before the slot is captured.
+	interrupted := filepath.Join(t.TempDir(), "interrupted.json")
+	if err := os.WriteFile(interrupted, []byte(`{"findings":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunReviewCaptureResult(captureArgs(interrupted), io.Discard); err == nil {
+		t.Fatal("interrupted recovery capture with an incomplete payload was accepted")
+	}
+	// A clean retry of the identical binding with the correct extracted
+	// payload must succeed and finalize.
+	extracted := filepath.Join(t.TempDir(), "extracted.json")
+	if err := os.WriteFile(extracted, []byte(`{"findings":[],"evidence":["checked exact target"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := RunReviewCaptureResult(captureArgs(extracted), &output); err != nil {
+		t.Fatalf("retry after interrupted recovery failed: %v", err)
+	}
+	manifest := strings.TrimSpace(output.String())
+	if err := RunReviewFacadeFinalize([]string{"--cwd", repo, "--lineage", started.LineageID, "--result-artifact", manifest}, io.Discard); err != nil {
+		t.Fatalf("finalize after interrupted-recovery retry failed: %v", err)
+	}
+}
+
 func initNestedReviewCLIRepo(t *testing.T) (string, string) {
 	t.Helper()
 	parent := initReviewCLIRepo(t)
