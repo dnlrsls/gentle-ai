@@ -928,6 +928,31 @@ func classifyCompactCorrectionTarget(ctx context.Context, repo string, existing,
 	return compactCorrectionTargetBlocked
 }
 
+// compactCorrectionRecoveryDisposition names the `review recover --disposition`
+// value the recovery rules accept for a correction-required predecessor that
+// classifyCompactCorrectionTarget already classified as
+// compactCorrectionTargetRecover. It re-evaluates the very predicates that
+// authorize each recovery — compactHistoricalFailedValidator for the escalated
+// disposition, and the genesis-scope expansion/contraction pair for the
+// scope-changed disposition — in the same order, so status can never name a
+// disposition ValidateCompactRecovery would reject. It authorizes nothing on
+// its own and returns "" when no disposition applies.
+func compactCorrectionRecoveryDisposition(existing CompactState, live Snapshot) RecoveryDisposition {
+	if existing.State != StateCorrectionRequired {
+		return ""
+	}
+	if compactHistoricalFailedValidator(existing) {
+		if compactEscalatedRecoveryTargetChanged(existing.CurrentSnapshot, live) {
+			return RecoveryEscalated
+		}
+		return ""
+	}
+	if compactRecoveryAddsGenesisPath(existing, live) || compactRecoveryContractsGenesisPaths(existing, live) {
+		return RecoveryScopeChanged
+	}
+	return ""
+}
+
 func compactStartInitialSnapshotsEqual(existing, requested CompactState) bool {
 	return compactStartDeliveryScopeMatches(existing, requested) &&
 		existing.InitialSnapshot.CandidateTree == requested.InitialSnapshot.CandidateTree
@@ -1012,6 +1037,27 @@ func (store CompactStore) Replace(expectedRevision, operation string, next Compa
 }
 
 func (store CompactStore) ReplaceContext(ctx context.Context, expectedRevision, operation string, next CompactState) (string, error) {
+	return store.replaceContextGuarded(ctx, expectedRevision, operation, next, nil)
+}
+
+// replaceContextGuarded commits exactly like ReplaceContext, but runs guard
+// inside the same critical section that publishes the successor, immediately
+// before the state file is written and after the revision CAS has passed.
+//
+// It exists because the revision CAS alone cannot see every relevant change:
+// CaptureReviewerResult publishes its artifact under the reviewer-results
+// directory while holding this same store lock and never bumps the authority
+// revision, so a precondition an operation derived from that directory before
+// taking the lock is stale by the time the CAS succeeds. A guard re-derives
+// such a precondition from the authoritative on-disk state while the lock is
+// held, which makes the check atomic with the commit.
+//
+// The guard runs with the store lock already held and must never acquire it
+// again — acquireStoreLock and acquireLocalStoreLock take an exclusive advisory
+// lock on the same file, and a second acquisition from this process would be
+// refused rather than granted. Guards are therefore restricted to lock-free
+// reads of the authority directory.
+func (store CompactStore) replaceContextGuarded(ctx context.Context, expectedRevision, operation string, next CompactState, guard func() error) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -1077,6 +1123,11 @@ func (store CompactStore) ReplaceContext(ctx context.Context, expectedRevision, 
 	if store.repo != "" {
 		if err := validateCompactRepositoryEvidence(ctx, store.repo, current, next, operation); err != nil {
 			return "", fmt.Errorf("%w: %v", ErrInvalidSuccessor, err)
+		}
+	}
+	if guard != nil {
+		if err := guard(); err != nil {
+			return "", err
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -1208,6 +1259,23 @@ func validateCompactSuccessor(previous, next CompactState, operation string) err
 		}
 		if !reflectCompactReviewData(previous, next) || previous.EvidenceHash != next.EvidenceHash {
 			return fmt.Errorf("%w: compact correction changed frozen review evidence", ErrInvalidSuccessor)
+		}
+	case CompactResultDispositionOperation:
+		// reviewing -> escalated. The disposition may only append its own audit
+		// record and flip the terminal state; freezing every other field here is
+		// what keeps captured lens results, findings, and evidence untouched and
+		// makes it impossible to launder a refused payload into an admitted one.
+		if previous.State != StateReviewing || next.State != StateEscalated {
+			return fmt.Errorf("%w: a reviewer result disposition terminally escalates a reviewing authority only", ErrInvalidSuccessor)
+		}
+		if len(next.ResultDispositions) != len(previous.ResultDispositions)+1 {
+			return fmt.Errorf("%w: a reviewer result disposition records exactly one disposition", ErrInvalidSuccessor)
+		}
+		expected := previous
+		expected.State = StateEscalated
+		expected.ResultDispositions = next.ResultDispositions
+		if !compactStateEqual(expected, next) {
+			return fmt.Errorf("%w: reviewer result disposition changed unrelated state", ErrInvalidSuccessor)
 		}
 	case "review/complete-verification":
 		if previous.State != StateValidating || next.State != StateApproved && next.State != StateEscalated || !validSHA256(next.EvidenceHash) {
