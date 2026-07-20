@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -84,6 +85,17 @@ func TestWriteFileAtomicRelaxesWindowsDirectoryACL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetNamedSecurityInfo(after write) error = %v", err)
 	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatalf("SECURITY_DESCRIPTOR.DACL(after write) error = %v", err)
+	}
+	granted, err := aclGrantsRightsToSID(dacl, user.User.Sid, fileDeleteChild)
+	if err != nil {
+		t.Fatalf("inspect parent DACL error = %v", err)
+	}
+	if granted {
+		t.Fatal("directory DACL grants FILE_DELETE_CHILD after ACL relaxation")
+	}
 	control, _, err := descriptor.Control()
 	if err != nil {
 		t.Fatalf("SECURITY_DESCRIPTOR.Control(after write) error = %v", err)
@@ -98,6 +110,42 @@ func TestWriteFileAtomicRelaxesWindowsDirectoryACL(t *testing.T) {
 	if string(got) != string(content) {
 		t.Fatalf("file content = %q, want %q", got, content)
 	}
+}
+
+func TestCreateAtomicTempPreservesErrorAndPresentNullDACL(t *testing.T) {
+	dir := t.TempDir()
+	requirePersistentACL(t, dir)
+	restoreDACL(t, dir)
+	if err := windows.SetNamedSecurityInfo(
+		dir,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("SetNamedSecurityInfo(NULL DACL fixture) error = %v", err)
+	}
+	assertPresentNullDACL(t, dir)
+	if err := relaxAtomicDirectoryACL(dir); err == nil {
+		t.Fatal("relaxAtomicDirectoryACL() error = nil, want present NULL DACL rejected")
+	}
+	assertPresentNullDACL(t, dir)
+
+	initialErr := &os.PathError{Op: "createtemp", Path: dir, Err: windows.ERROR_ACCESS_DENIED}
+	createCalls := 0
+	_, err := createAtomicTempWith(dir, filepath.Join(dir, "target.txt"), func(string, string) (*os.File, error) {
+		createCalls++
+		return nil, initialErr
+	})
+	if err != initialErr {
+		t.Fatalf("createAtomicTempWith() error = %v, want original error %v", err, initialErr)
+	}
+	if createCalls != 1 {
+		t.Fatalf("CreateTemp calls = %d, want 1", createCalls)
+	}
+	assertPresentNullDACL(t, dir)
 }
 
 func TestWriteFileAtomicDoesNotBypassExplicitWindowsDeny(t *testing.T) {
@@ -328,4 +376,36 @@ func restoreDACL(t *testing.T, path string) {
 			t.Errorf("restore DACL: %v", err)
 		}
 	})
+}
+
+func assertPresentNullDACL(t *testing.T, path string) {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo() error = %v", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatalf("SECURITY_DESCRIPTOR.DACL() error = %v", err)
+	}
+	if dacl != nil {
+		t.Fatalf("DACL = %p, want present NULL DACL", dacl)
+	}
+}
+
+func aclGrantsRightsToSID(dacl *windows.ACL, sid *windows.SID, rights windows.ACCESS_MASK) (bool, error) {
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil {
+			return false, err
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
+		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if aceSID.Equals(sid) && ace.Mask&rights != 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }

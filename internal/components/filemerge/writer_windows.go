@@ -14,7 +14,7 @@ import (
 
 const (
 	fileDeleteChild       windows.ACCESS_MASK = 0x00000040
-	atomicDirectoryRights                     = windows.FILE_WRITE_DATA | fileDeleteChild
+	atomicDirectoryRights                     = windows.FILE_WRITE_DATA
 
 	accessDeniedObjectACEType         = 6
 	accessDeniedCallbackACEType       = 10
@@ -25,11 +25,18 @@ const (
 	minimumSIDSize                    = 8
 )
 
+var errPresentNullDACL = errors.New("security descriptor has a present NULL DACL")
+
 func createAtomicTemp(dir, target string) (*os.File, error) {
-	tmp, err := os.CreateTemp(dir, ".gentle-ai-*.tmp")
+	return createAtomicTempWith(dir, target, os.CreateTemp)
+}
+
+func createAtomicTempWith(dir, target string, createTemp func(string, string) (*os.File, error)) (*os.File, error) {
+	tmp, err := createTemp(dir, ".gentle-ai-*.tmp")
 	if err == nil || !errors.Is(err, fs.ErrPermission) {
 		return tmp, err
 	}
+	initialErr := err
 	denied, err := targetDeniesDelete(target)
 	if err != nil {
 		return nil, fmt.Errorf("inspect destination DACL %q: %w", target, err)
@@ -38,9 +45,12 @@ func createAtomicTemp(dir, target string) (*os.File, error) {
 		return nil, fmt.Errorf("existing destination DACL denies delete: %w", fs.ErrPermission)
 	}
 	if err := relaxAtomicDirectoryACL(dir); err != nil {
+		if errors.Is(err, errPresentNullDACL) {
+			return nil, initialErr
+		}
 		return nil, fmt.Errorf("relax parent directory ACL %q: %w", dir, err)
 	}
-	tmp, err = os.CreateTemp(dir, ".gentle-ai-*.tmp")
+	tmp, err = createTemp(dir, ".gentle-ai-*.tmp")
 	if err != nil {
 		return nil, fmt.Errorf("retry after relaxing parent directory ACL: %w", err)
 	}
@@ -74,6 +84,9 @@ func relaxAtomicDirectoryACL(dir string) error {
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
 		return fmt.Errorf("read DACL entries: %w", err)
+	}
+	if dacl == nil {
+		return errPresentNullDACL
 	}
 	denied, err := deniesAccessRights(dacl, atomicDirectoryRights)
 	if err != nil {
