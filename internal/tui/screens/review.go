@@ -89,8 +89,12 @@ func reviewPersonaLabel(persona model.PersonaID) string {
 	if persona == model.PersonaCustom {
 		return "keep existing persona unmanaged"
 	}
+	// Keep the persona ID visible: this is the confirm-before-write screen, so
+	// the reader must be able to see the exact value that lands in state.json,
+	// not only its prose description. The two Gentleman variants differ solely
+	// by the "(legacy alias)" suffix, which is too easy to miss on its own.
 	if description, ok := personaDescriptions[persona]; ok {
-		return description
+		return string(persona) + " — " + description
 	}
 	return string(persona)
 }
