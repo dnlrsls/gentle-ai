@@ -52,6 +52,39 @@ func TestMaintenanceLockModesAndRelease(t *testing.T) {
 	}
 }
 
+func TestEnsureMaintenanceLockPathRejectsRelativePathWithoutHanging(t *testing.T) {
+	if os.Getenv("GENTLE_AI_RELATIVE_MAINTENANCE_PATH_HELPER") == "1" {
+		if err := ensureMaintenanceLockPath(filepath.Join("relative", "MAINTENANCE.lock")); err == nil {
+			t.Fatal("relative maintenance lock path was accepted")
+		}
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestEnsureMaintenanceLockPathRejectsRelativePathWithoutHanging$")
+	command.Dir = t.TempDir()
+	command.Env = append(os.Environ(), "GENTLE_AI_RELATIVE_MAINTENANCE_PATH_HELPER=1")
+	output, err := command.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("relative maintenance lock path validation did not return: %v", ctx.Err())
+	}
+	if err != nil {
+		t.Fatalf("relative maintenance lock path helper: %v\n%s", err, output)
+	}
+}
+
+func TestEnsureMaintenanceLockPathAcceptsCanonicalAbsolutePath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "gentle-ai", "review-transactions")
+	path := filepath.Clean(filepath.Join(dir, "MAINTENANCE.lock"))
+	if err := ensureMaintenanceLockPath(path); err != nil {
+		t.Fatalf("canonical absolute maintenance lock path: %v", err)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("maintenance lock directory = %v, %v", info, err)
+	}
+}
+
 func TestMaintenanceLockRejectsSymlinksAndStaleBytesAreNotOwnership(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "gentle-ai", "review-transactions", "MAINTENANCE.lock")
