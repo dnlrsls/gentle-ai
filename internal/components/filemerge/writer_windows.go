@@ -27,34 +27,49 @@ const (
 
 var errPresentNullDACL = errors.New("security descriptor has a present NULL DACL")
 
-func createAtomicTemp(dir, target string) (*os.File, error) {
-	return createAtomicTempWith(dir, target, os.CreateTemp)
+type relaxDirectoryACL func(string) (func() error, error)
+
+type setDirectoryDACL func(string, windows.SECURITY_INFORMATION, *windows.ACL) error
+
+func createAtomicTemp(dir, _ string) (*os.File, func() error, error) {
+	tmp, err := os.CreateTemp(dir, ".gentle-ai-*.tmp")
+	return tmp, nil, err
 }
 
-func createAtomicTempWith(dir, target string, createTemp func(string, string) (*os.File, error)) (*os.File, error) {
+func createAtomicTempWith(dir, target string, createTemp func(string, string) (*os.File, error)) (*os.File, func() error, error) {
+	return createAtomicTempWithACL(dir, target, createTemp, relaxAtomicDirectoryACL)
+}
+
+func createAtomicTempWithACL(dir, target string, createTemp func(string, string) (*os.File, error), relax relaxDirectoryACL) (*os.File, func() error, error) {
 	tmp, err := createTemp(dir, ".gentle-ai-*.tmp")
 	if err == nil || !errors.Is(err, fs.ErrPermission) {
-		return tmp, err
+		return tmp, nil, err
 	}
 	initialErr := err
 	denied, err := targetDeniesDelete(target)
 	if err != nil {
-		return nil, fmt.Errorf("inspect destination DACL %q: %w", target, err)
+		return nil, nil, fmt.Errorf("inspect destination DACL %q: %w", target, err)
 	}
 	if denied {
-		return nil, fmt.Errorf("existing destination DACL denies delete: %w", fs.ErrPermission)
+		return nil, nil, fmt.Errorf("existing destination DACL denies delete: %w", fs.ErrPermission)
 	}
-	if err := relaxAtomicDirectoryACL(dir); err != nil {
+	restore, err := relax(dir)
+	if err != nil {
 		if errors.Is(err, errPresentNullDACL) {
-			return nil, initialErr
+			return nil, nil, initialErr
 		}
-		return nil, fmt.Errorf("relax parent directory ACL %q: %w", dir, err)
+		return nil, nil, fmt.Errorf("relax parent directory ACL %q: %w", dir, err)
 	}
 	tmp, err = createTemp(dir, ".gentle-ai-*.tmp")
 	if err != nil {
-		return nil, fmt.Errorf("retry after relaxing parent directory ACL: %w", err)
+		retryErr := fmt.Errorf("retry after relaxing parent directory ACL: %w", err)
+		if restoreErr := restore(); restoreErr != nil {
+			restoreRetryErr := restore()
+			return nil, nil, errors.Join(retryErr, fmt.Errorf("restore parent directory ACL: %w", errors.Join(restoreErr, restoreRetryErr)))
+		}
+		return nil, nil, retryErr
 	}
-	return tmp, nil
+	return tmp, restore, nil
 }
 
 func targetDeniesDelete(path string) (bool, error) {
@@ -72,36 +87,42 @@ func targetDeniesDelete(path string) (bool, error) {
 	return deniesAccessRights(dacl, windows.DELETE)
 }
 
-func relaxAtomicDirectoryACL(dir string) error {
+func relaxAtomicDirectoryACL(dir string) (func() error, error) {
+	return relaxAtomicDirectoryACLWith(dir, func(path string, securityInfo windows.SECURITY_INFORMATION, dacl *windows.ACL) error {
+		return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, securityInfo, nil, nil, dacl, nil)
+	})
+}
+
+func relaxAtomicDirectoryACLWith(dir string, setDACL setDirectoryDACL) (func() error, error) {
 	descriptor, err := windows.GetNamedSecurityInfo(
 		dir,
 		windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
-		return fmt.Errorf("read DACL: %w", err)
+		return nil, fmt.Errorf("read DACL: %w", err)
 	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
-		return fmt.Errorf("read DACL entries: %w", err)
+		return nil, fmt.Errorf("read DACL entries: %w", err)
 	}
 	if dacl == nil {
-		return errPresentNullDACL
+		return nil, errPresentNullDACL
 	}
 	denied, err := deniesAccessRights(dacl, atomicDirectoryRights)
 	if err != nil {
-		return fmt.Errorf("inspect DACL: %w", err)
+		return nil, fmt.Errorf("inspect DACL: %w", err)
 	}
 	if denied {
-		return fmt.Errorf("existing DACL denies atomic directory rights: %w", fs.ErrPermission)
+		return nil, fmt.Errorf("existing DACL denies atomic directory rights: %w", fs.ErrPermission)
 	}
 	control, _, err := descriptor.Control()
 	if err != nil {
-		return fmt.Errorf("read DACL control: %w", err)
+		return nil, fmt.Errorf("read DACL control: %w", err)
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
-		return fmt.Errorf("read process user: %w", err)
+		return nil, fmt.Errorf("read process user: %w", err)
 	}
 
 	// FILE_WRITE_DATA is FILE_ADD_FILE when the secured object is a directory.
@@ -116,24 +137,21 @@ func relaxAtomicDirectoryACL(dir string) error {
 		},
 	}}, dacl)
 	if err != nil {
-		return fmt.Errorf("merge DACL: %w", err)
+		return nil, fmt.Errorf("merge DACL: %w", err)
 	}
 	securityInfo := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
 	if control&windows.SE_DACL_PROTECTED != 0 {
 		securityInfo = windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	}
-	if err := windows.SetNamedSecurityInfo(
-		dir,
-		windows.SE_FILE_OBJECT,
-		securityInfo,
-		nil,
-		nil,
-		acl,
-		nil,
-	); err != nil {
-		return fmt.Errorf("write DACL: %w", err)
+	if err := setDACL(dir, securityInfo, acl); err != nil {
+		return nil, fmt.Errorf("write DACL: %w", err)
 	}
-	return nil
+	return func() error {
+		if err := setDACL(dir, securityInfo, dacl); err != nil {
+			return fmt.Errorf("write original DACL: %w", err)
+		}
+		return nil
+	}, nil
 }
 
 func deniesAccessRights(dacl *windows.ACL, rights windows.ACCESS_MASK) (bool, error) {

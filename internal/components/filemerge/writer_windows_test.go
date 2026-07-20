@@ -3,6 +3,7 @@
 package filemerge
 
 import (
+	"bytes"
 	"errors"
 	"io/fs"
 	"os"
@@ -33,81 +34,326 @@ func TestDenyGroupApplies(t *testing.T) {
 	}
 }
 
-func TestWriteFileAtomicRelaxesWindowsDirectoryACL(t *testing.T) {
+func createAtomicTempWithRelaxedACL(dir, target string) (*os.File, func() error, error) {
+	return createAtomicTempWith(dir, target, os.CreateTemp)
+}
+
+func TestWriteFileAtomicFailsClosedWhenWindowsDirectoryDeniesCreate(t *testing.T) {
 	dir := t.TempDir()
 	requirePersistentACL(t, dir)
 	restoreDACL(t, dir)
-
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil {
-		t.Fatalf("GetTokenUser() error = %v", err)
-	}
-	readOnlyACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
-		AccessPermissions: windows.GENERIC_READ | windows.GENERIC_EXECUTE,
-		AccessMode:        windows.GRANT_ACCESS,
-		Trustee: windows.TRUSTEE{
-			TrusteeForm:  windows.TRUSTEE_IS_SID,
-			TrusteeType:  windows.TRUSTEE_IS_USER,
-			TrusteeValue: windows.TrusteeValueFromSID(user.User.Sid),
-		},
-	}}, nil)
-	if err != nil {
-		t.Fatalf("ACLFromEntries() error = %v", err)
-	}
-	if err := windows.SetNamedSecurityInfo(
-		dir,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		readOnlyACL,
-		nil,
-	); err != nil {
-		t.Fatalf("SetNamedSecurityInfo(read-only fixture) error = %v", err)
-	}
-
-	probe, err := os.CreateTemp(dir, "acl-probe-*.tmp")
-	if err == nil {
-		probe.Close()
-		os.Remove(probe.Name())
-		t.Fatal("os.CreateTemp() succeeded before WriteFileAtomic; fixture did not deny file creation")
-	}
-	if !errors.Is(err, fs.ErrPermission) {
-		t.Fatalf("os.CreateTemp() error = %v, want fs.ErrPermission", err)
-	}
-
+	setReadOnlyDirectoryACL(t, dir, true)
+	originalACL := captureDACL(t, dir)
 	path := filepath.Join(dir, "SKILL.md")
-	content := []byte("# Windows ACL\n")
-	if _, err := WriteFileAtomic(path, content, 0o644); err != nil {
-		t.Fatalf("WriteFileAtomic() error = %v, want successful ACL relaxation", err)
+
+	_, err := WriteFileAtomic(path, []byte("# Windows ACL\n"), 0o644)
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("WriteFileAtomic() error = %v, want fs.ErrPermission", err)
 	}
-	descriptor, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		t.Fatalf("GetNamedSecurityInfo(after write) error = %v", err)
+	assertDACLMatches(t, dir, originalACL)
+	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("Stat(target) error = %v, want fs.ErrNotExist", statErr)
 	}
-	dacl, _, err := descriptor.DACL()
-	if err != nil {
-		t.Fatalf("SECURITY_DESCRIPTOR.DACL(after write) error = %v", err)
+	tmpFiles, globErr := filepath.Glob(filepath.Join(dir, ".gentle-ai-*.tmp"))
+	if globErr != nil {
+		t.Fatalf("Glob(temp files) error = %v", globErr)
 	}
-	granted, err := aclGrantsRightsToSID(dacl, user.User.Sid, fileDeleteChild)
-	if err != nil {
-		t.Fatalf("inspect parent DACL error = %v", err)
+	if len(tmpFiles) != 0 {
+		t.Fatalf("temporary files = %v, want none", tmpFiles)
 	}
-	if granted {
-		t.Fatal("directory DACL grants FILE_DELETE_CHILD after ACL relaxation")
+}
+
+func TestCreateAtomicTempRestoresWindowsDirectoryACLAfterRetryFailure(t *testing.T) {
+	dir := t.TempDir()
+	requirePersistentACL(t, dir)
+	restoreDACL(t, dir)
+	setReadOnlyDirectoryACL(t, dir, true)
+	originalACL := captureDACL(t, dir)
+
+	initialErr := &os.PathError{Op: "createtemp", Path: dir, Err: windows.ERROR_ACCESS_DENIED}
+	retryErr := errors.New("retry failed")
+	createCalls := 0
+	_, _, err := createAtomicTempWith(dir, filepath.Join(dir, "target.txt"), func(string, string) (*os.File, error) {
+		createCalls++
+		if createCalls == 1 {
+			return nil, initialErr
+		}
+		return nil, retryErr
+	})
+	if !errors.Is(err, retryErr) {
+		t.Fatalf("createAtomicTempWith() error = %v, want retry error %v", err, retryErr)
 	}
-	control, _, err := descriptor.Control()
-	if err != nil {
-		t.Fatalf("SECURITY_DESCRIPTOR.Control(after write) error = %v", err)
+	if createCalls != 2 {
+		t.Fatalf("CreateTemp calls = %d, want 2", createCalls)
 	}
-	if control&windows.SE_DACL_PROTECTED == 0 {
-		t.Fatal("directory DACL became unprotected after ACL relaxation")
+	assertDACLMatches(t, dir, originalACL)
+}
+
+func TestCreateAtomicTempRestoresExactWindowsDACLState(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*testing.T, string)
+	}{
+		{
+			name: "protected DACL",
+			configure: func(t *testing.T, dir string) {
+				setReadOnlyDirectoryACL(t, dir, true)
+			},
+		},
+		{
+			name: "unprotected DACL with inherited ACEs",
+			configure: func(t *testing.T, dir string) {
+				setReadOnlyDirectoryACL(t, dir, false)
+			},
+		},
+		{
+			name: "empty DACL",
+			configure: func(t *testing.T, dir string) {
+				emptyACLBytes := []byte{2, 0, 8, 0, 0, 0, 0, 0}
+				emptyACL := (*windows.ACL)(unsafe.Pointer(&emptyACLBytes[0]))
+				if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, emptyACL, nil); err != nil {
+					t.Fatalf("SetNamedSecurityInfo(empty DACL) error = %v", err)
+				}
+			},
+		},
 	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			requirePersistentACL(t, dir)
+			restoreDACL(t, dir)
+			tt.configure(t, dir)
+			originalACL := captureDACL(t, dir)
+			initialErr := &os.PathError{Op: "createtemp", Path: dir, Err: windows.ERROR_ACCESS_DENIED}
+			createCalls := 0
+			tmp, restore, err := createAtomicTempWith(dir, filepath.Join(dir, "target.txt"), func(dir, pattern string) (*os.File, error) {
+				createCalls++
+				if createCalls == 1 {
+					return nil, initialErr
+				}
+				return os.CreateTemp(dir, pattern)
+			})
+			if err != nil {
+				t.Fatalf("createAtomicTempWith() error = %v", err)
+			}
+			tmpPath := tmp.Name()
+			t.Cleanup(func() { os.Remove(tmpPath) })
+			if err := tmp.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+			if err := restore(); err != nil {
+				t.Fatalf("restore() error = %v", err)
+			}
+			assertDACLMatches(t, dir, originalACL)
+		})
+	}
+}
+
+func TestCreateAtomicTempLeavesACLUnchangedAfterInstallFailure(t *testing.T) {
+	dir := t.TempDir()
+	requirePersistentACL(t, dir)
+	restoreDACL(t, dir)
+	setReadOnlyDirectoryACL(t, dir, true)
+	originalACL := captureDACL(t, dir)
+	installErr := errors.New("install ACL failed")
+
+	_, _, err := createAtomicTempWithACL(
+		dir,
+		filepath.Join(dir, "target.txt"),
+		func(string, string) (*os.File, error) {
+			return nil, &os.PathError{Op: "createtemp", Path: dir, Err: windows.ERROR_ACCESS_DENIED}
+		},
+		func(string) (func() error, error) {
+			return nil, installErr
+		},
+	)
+	if !errors.Is(err, installErr) {
+		t.Fatalf("createAtomicTempWithACL() error = %v, want install error %v", err, installErr)
+	}
+	assertDACLMatches(t, dir, originalACL)
+}
+
+func TestCreateAtomicTempRetriesACLRestoreAfterRetryFailure(t *testing.T) {
+	dir := t.TempDir()
+	requirePersistentACL(t, dir)
+	restoreDACL(t, dir)
+	setReadOnlyDirectoryACL(t, dir, true)
+	originalACL := captureDACL(t, dir)
+	retryErr := errors.New("temp retry failed")
+	restoreErr := errors.New("restore ACL failed")
+	createCalls := 0
+	setCalls := 0
+
+	_, _, err := createAtomicTempWithACL(
+		dir,
+		filepath.Join(dir, "target.txt"),
+		func(string, string) (*os.File, error) {
+			createCalls++
+			if createCalls == 1 {
+				return nil, &os.PathError{Op: "createtemp", Path: dir, Err: windows.ERROR_ACCESS_DENIED}
+			}
+			return nil, retryErr
+		},
+		func(dir string) (func() error, error) {
+			return relaxAtomicDirectoryACLWith(dir, func(path string, securityInfo windows.SECURITY_INFORMATION, dacl *windows.ACL) error {
+				setCalls++
+				if setCalls == 2 {
+					return restoreErr
+				}
+				return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, securityInfo, nil, nil, dacl, nil)
+			})
+		},
+	)
+	if !errors.Is(err, retryErr) || !errors.Is(err, restoreErr) {
+		t.Fatalf("createAtomicTempWithACL() error = %v, want retry error %v and restore error %v", err, retryErr, restoreErr)
+	}
+	if setCalls != 3 {
+		t.Fatalf("SetNamedSecurityInfo calls = %d, want install plus two restore attempts", setCalls)
+	}
+	assertDACLMatches(t, dir, originalACL)
+}
+
+func TestWriteFileAtomicFailsClosedAfterACLRestoreFailure(t *testing.T) {
+	dir := t.TempDir()
+	requirePersistentACL(t, dir)
+	restoreDACL(t, dir)
+	setReadOnlyDirectoryACL(t, dir, true)
+	originalACL := captureDACL(t, dir)
+	path := filepath.Join(dir, "target.txt")
+	restoreErr := errors.New("restore ACL failed")
+	setCalls := 0
+	operations := defaultAtomicWriteOperations
+	operations.createTemp = func(dir, target string) (*os.File, func() error, error) {
+		return createAtomicTempWithACL(dir, target, os.CreateTemp, func(dir string) (func() error, error) {
+			restore, err := relaxAtomicDirectoryACLWith(dir, func(path string, securityInfo windows.SECURITY_INFORMATION, dacl *windows.ACL) error {
+				setCalls++
+				if setCalls == 2 {
+					return restoreErr
+				}
+				return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, securityInfo, nil, nil, dacl, nil)
+			})
+			return restore, err
+		})
+	}
+
+	_, err := writeFileAtomic(path, []byte("new\n"), 0o644, operations)
+	if !errors.Is(err, restoreErr) {
+		t.Fatalf("writeFileAtomic() error = %v, want restore error %v", err, restoreErr)
+	}
+	if setCalls != 3 {
+		t.Fatalf("SetNamedSecurityInfo calls = %d, want install plus two restore attempts", setCalls)
+	}
+	assertDACLMatches(t, dir, originalACL)
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("ReadFile(target) error = %v", readErr)
+	}
+	if string(got) != "new\n" {
+		t.Fatalf("target content = %q, want completed atomic replacement", got)
+	}
+}
+
+func TestWriteFileAtomicRestoresWindowsDirectoryACLAfterOperationFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*atomicWriteOperations, error)
+	}{
+		{
+			name: "write",
+			mutate: func(operations *atomicWriteOperations, wantErr error) {
+				operations.write = func(*os.File, []byte) (int, error) { return 0, wantErr }
+			},
+		},
+		{
+			name: "chmod",
+			mutate: func(operations *atomicWriteOperations, wantErr error) {
+				operations.chmod = func(*os.File, fs.FileMode) error { return wantErr }
+			},
+		},
+		{
+			name: "sync",
+			mutate: func(operations *atomicWriteOperations, wantErr error) {
+				operations.sync = func(*os.File) error { return wantErr }
+			},
+		},
+		{
+			name: "close",
+			mutate: func(operations *atomicWriteOperations, wantErr error) {
+				operations.close = func(file *os.File) error {
+					if err := file.Close(); err != nil {
+						return err
+					}
+					return wantErr
+				}
+			},
+		},
+		{
+			name: "rename",
+			mutate: func(operations *atomicWriteOperations, wantErr error) {
+				operations.rename = func(string, string) error { return wantErr }
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			requirePersistentACL(t, dir)
+			restoreDACL(t, dir)
+			path := filepath.Join(dir, "existing.txt")
+			originalContent := []byte("original\n")
+			if err := os.WriteFile(path, originalContent, 0o644); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+			setReadOnlyDirectoryACL(t, dir, true)
+			setCurrentUserACL(t, path, windows.GENERIC_ALL, true)
+			originalACL := captureDACL(t, dir)
+			wantErr := errors.New(tt.name + " failed")
+			operations := defaultAtomicWriteOperations
+			operations.createTemp = createAtomicTempWithRelaxedACL
+			tt.mutate(&operations, wantErr)
+
+			_, err := writeFileAtomic(path, []byte("replacement\n"), 0o644, operations)
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("writeFileAtomic() error = %v, want %v", err, wantErr)
+			}
+			assertDACLMatches(t, dir, originalACL)
+			got, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatalf("ReadFile() error = %v", readErr)
+			}
+			if !bytes.Equal(got, originalContent) {
+				t.Fatalf("file content = %q, want unchanged %q", got, originalContent)
+			}
+		})
+	}
+}
+
+func TestWriteFileAtomicRestoresWindowsDirectoryACLWhenReplacingTarget(t *testing.T) {
+	dir := t.TempDir()
+	requirePersistentACL(t, dir)
+	restoreDACL(t, dir)
+	path := filepath.Join(dir, "existing.txt")
+	if err := os.WriteFile(path, []byte("original\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	setReadOnlyDirectoryACL(t, dir, true)
+	setCurrentUserACL(t, path, windows.GENERIC_ALL, true)
+	originalACL := captureDACL(t, dir)
+
+	content := []byte("replacement\n")
+	operations := defaultAtomicWriteOperations
+	operations.createTemp = createAtomicTempWithRelaxedACL
+	if _, err := writeFileAtomic(path, content, 0o644, operations); err != nil {
+		t.Fatalf("writeFileAtomic() error = %v, want successful replacement", err)
+	}
+	assertDACLMatches(t, dir, originalACL)
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	if string(got) != string(content) {
+	if !bytes.Equal(got, content) {
 		t.Fatalf("file content = %q, want %q", got, content)
 	}
 }
@@ -128,14 +374,14 @@ func TestCreateAtomicTempPreservesErrorAndPresentNullDACL(t *testing.T) {
 		t.Fatalf("SetNamedSecurityInfo(NULL DACL fixture) error = %v", err)
 	}
 	assertPresentNullDACL(t, dir)
-	if err := relaxAtomicDirectoryACL(dir); err == nil {
+	if _, err := relaxAtomicDirectoryACL(dir); err == nil {
 		t.Fatal("relaxAtomicDirectoryACL() error = nil, want present NULL DACL rejected")
 	}
 	assertPresentNullDACL(t, dir)
 
 	initialErr := &os.PathError{Op: "createtemp", Path: dir, Err: windows.ERROR_ACCESS_DENIED}
 	createCalls := 0
-	_, err := createAtomicTempWith(dir, filepath.Join(dir, "target.txt"), func(string, string) (*os.File, error) {
+	_, _, err := createAtomicTempWith(dir, filepath.Join(dir, "target.txt"), func(string, string) (*os.File, error) {
 		createCalls++
 		return nil, initialErr
 	})
@@ -257,8 +503,10 @@ func TestWriteFileAtomicIgnoresUnrelatedWindowsDeny(t *testing.T) {
 
 	path := filepath.Join(dir, "allowed.txt")
 	content := []byte("allowed\n")
-	if _, err := WriteFileAtomic(path, content, 0o644); err != nil {
-		t.Fatalf("WriteFileAtomic() error = %v, want unrelated deny ignored", err)
+	operations := defaultAtomicWriteOperations
+	operations.createTemp = createAtomicTempWithRelaxedACL
+	if _, err := writeFileAtomic(path, content, 0o644, operations); err != nil {
+		t.Fatalf("writeFileAtomic() error = %v, want unrelated deny ignored", err)
 	}
 	got, err := os.ReadFile(path)
 	if err != nil {
@@ -376,6 +624,87 @@ func restoreDACL(t *testing.T, path string) {
 			t.Errorf("restore DACL: %v", err)
 		}
 	})
+}
+
+type daclSnapshot struct {
+	present bool
+	null    bool
+	control windows.SECURITY_DESCRIPTOR_CONTROL
+	acl     []byte
+}
+
+type aclHeader struct {
+	revision uint8
+	reserved uint8
+	size     uint16
+	aceCount uint16
+	padding  uint16
+}
+
+func captureDACL(t *testing.T, path string) daclSnapshot {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatalf("GetNamedSecurityInfo(%q) error = %v", path, err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatalf("SECURITY_DESCRIPTOR.DACL(%q) error = %v", path, err)
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		t.Fatalf("SECURITY_DESCRIPTOR.Control(%q) error = %v", path, err)
+	}
+	snapshot := daclSnapshot{
+		present: control&windows.SE_DACL_PRESENT != 0,
+		null:    dacl == nil,
+		control: control,
+	}
+	if dacl != nil {
+		header := (*aclHeader)(unsafe.Pointer(dacl))
+		snapshot.acl = bytes.Clone(unsafe.Slice((*byte)(unsafe.Pointer(dacl)), int(header.size)))
+	}
+	return snapshot
+}
+
+func assertDACLMatches(t *testing.T, path string, want daclSnapshot) {
+	t.Helper()
+	got := captureDACL(t, path)
+	if got.present != want.present || got.null != want.null || got.control != want.control || !bytes.Equal(got.acl, want.acl) {
+		t.Fatalf("DACL changed for %q:\n got present=%t null=%t control=%#x acl=%x\nwant present=%t null=%t control=%#x acl=%x", path, got.present, got.null, got.control, got.acl, want.present, want.null, want.control, want.acl)
+	}
+}
+
+func setReadOnlyDirectoryACL(t *testing.T, path string, protected bool) {
+	t.Helper()
+	setCurrentUserACL(t, path, windows.GENERIC_READ|windows.GENERIC_EXECUTE, protected)
+}
+
+func setCurrentUserACL(t *testing.T, path string, permissions windows.ACCESS_MASK, protected bool) {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("GetTokenUser() error = %v", err)
+	}
+	dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: permissions,
+		AccessMode:        windows.GRANT_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(user.User.Sid),
+		},
+	}}, nil)
+	if err != nil {
+		t.Fatalf("ACLFromEntries() error = %v", err)
+	}
+	securityInfo := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
+	if protected {
+		securityInfo = windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, securityInfo, nil, nil, dacl, nil); err != nil {
+		t.Fatalf("SetNamedSecurityInfo(read-only fixture) error = %v", err)
+	}
 }
 
 func assertPresentNullDACL(t *testing.T, path string) {

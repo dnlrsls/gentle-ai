@@ -39,7 +39,29 @@ type WriteResult struct {
 	Created bool
 }
 
+type atomicWriteOperations struct {
+	createTemp func(string, string) (*os.File, func() error, error)
+	write      func(*os.File, []byte) (int, error)
+	chmod      func(*os.File, fs.FileMode) error
+	sync       func(*os.File) error
+	close      func(*os.File) error
+	rename     func(string, string) error
+}
+
+var defaultAtomicWriteOperations = atomicWriteOperations{
+	createTemp: createAtomicTemp,
+	write:      func(file *os.File, content []byte) (int, error) { return file.Write(content) },
+	chmod:      func(file *os.File, perm fs.FileMode) error { return file.Chmod(perm) },
+	sync:       func(file *os.File) error { return file.Sync() },
+	close:      func(file *os.File) error { return file.Close() },
+	rename:     os.Rename,
+}
+
 func WriteFileAtomic(path string, content []byte, perm fs.FileMode) (WriteResult, error) {
+	return writeFileAtomic(path, content, perm, defaultAtomicWriteOperations)
+}
+
+func writeFileAtomic(path string, content []byte, perm fs.FileMode, operations atomicWriteOperations) (result WriteResult, returnErr error) {
 	if perm == 0 {
 		perm = 0o644
 	}
@@ -61,7 +83,7 @@ func WriteFileAtomic(path string, content []byte, perm fs.FileMode) (WriteResult
 		return WriteResult{}, err
 	}
 
-	tmp, err := createAtomicTemp(dir, path)
+	tmp, restoreACL, err := operations.createTemp(dir, path)
 	if err != nil {
 		return WriteResult{}, fmt.Errorf("create temp file for %q: %w", path, err)
 	}
@@ -73,28 +95,48 @@ func WriteFileAtomic(path string, content []byte, perm fs.FileMode) (WriteResult
 			_ = os.Remove(tmpPath)
 		}
 	}()
+	restorePending := restoreACL != nil
+	restore := func() error {
+		if !restorePending {
+			return nil
+		}
+		if err := restoreACL(); err != nil {
+			return err
+		}
+		restorePending = false
+		return nil
+	}
+	defer func() {
+		if err := restore(); err != nil {
+			retryErr := restore()
+			returnErr = errors.Join(returnErr, fmt.Errorf("restore parent directory ACL for %q: %w", path, errors.Join(err, retryErr)))
+		}
+	}()
 
-	if _, err := tmp.Write(content); err != nil {
-		_ = tmp.Close()
+	if _, err := operations.write(tmp, content); err != nil {
+		_ = operations.close(tmp)
 		return WriteResult{}, fmt.Errorf("write temp file for %q: %w", path, err)
 	}
 
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close()
+	if err := operations.chmod(tmp, perm); err != nil {
+		_ = operations.close(tmp)
 		return WriteResult{}, fmt.Errorf("set permissions on temp file for %q: %w", path, err)
 	}
 
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
+	if err := operations.sync(tmp); err != nil {
+		_ = operations.close(tmp)
 		return WriteResult{}, fmt.Errorf("sync temp file for %q: %w", path, err)
 	}
 
-	if err := tmp.Close(); err != nil {
+	if err := operations.close(tmp); err != nil {
 		return WriteResult{}, fmt.Errorf("close temp file for %q: %w", path, err)
 	}
 
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := operations.rename(tmpPath, path); err != nil {
 		return WriteResult{}, fmt.Errorf("replace %q atomically: %w", path, err)
+	}
+	if err := restore(); err != nil {
+		return WriteResult{}, fmt.Errorf("restore parent directory ACL for %q: %w", path, err)
 	}
 
 	// Sync the parent directory to flush the new directory entry to disk.
