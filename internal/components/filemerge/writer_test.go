@@ -28,7 +28,7 @@ func isSymlinkPrivilegeError(err error) bool {
 
 func TestWriteFileAtomicReadOnlyDirRelaxesOwnerWritePermission(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("chmod 555 semantics differ on Windows")
+		t.Skip("chmod 555 semantics differ on Windows; the equivalent ACL-based coverage lives in writer_windows_test.go")
 	}
 	base := t.TempDir()
 	skillDir := filepath.Join(base, "sdd-init")
