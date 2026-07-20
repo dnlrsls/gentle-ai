@@ -123,6 +123,41 @@ type reviewResultArtifact struct {
 	SelectedOrder  int    `json:"selected_order"`
 }
 
+// ReviewerResultPayloadError is returned when a raw reviewer result payload is
+// structurally invalid before JSON decoding is attempted. Code is
+// machine-readable: "empty_result" for empty/whitespace-only payloads and
+// "nested_envelope" for payloads that still contain an XML task envelope.
+type ReviewerResultPayloadError struct {
+	Code    string
+	Message string
+}
+
+func (e *ReviewerResultPayloadError) Error() string { return e.Message }
+
+// validateReviewerResultPayload inspects the raw bytes of a reviewer result
+// before JSON decoding. It rejects two structurally distinct failure modes
+// that require separate diagnostics:
+//  1. empty_result: the task completed but produced no reviewer output.
+//  2. nested_envelope: the reviewer output was not extracted from its XML
+//     task wrapper before being passed as the strict JSON payload.
+func validateReviewerResultPayload(payload []byte) error {
+	if len(bytes.TrimSpace(payload)) == 0 {
+		return &ReviewerResultPayloadError{
+			Code:    "empty_result",
+			Message: "reviewer result payload is empty or whitespace-only: the task may have completed without producing output",
+		}
+	}
+	if bytes.Contains(payload, []byte("<task_result>")) || bytes.Contains(payload, []byte("</task_result>")) {
+		if !json.Valid(payload) {
+			return &ReviewerResultPayloadError{
+				Code:    "nested_envelope",
+				Message: "reviewer result payload contains a raw XML task envelope: extract the strict JSON reviewer output from <task_result> before capture",
+			}
+		}
+	}
+	return nil
+}
+
 var reviewArtifactAfterLstat = func() {}
 var reviewArtifactRuntimeGOOS = func() string { return runtime.GOOS }
 var syncReviewerArtifactDirectory = func(path string) error {
@@ -183,6 +218,9 @@ func RunReviewCaptureResult(args []string, stdout io.Writer) error {
 	payload, err := readFacadeBytes(*input)
 	if err != nil {
 		return reviewPreflightError(fmt.Errorf("read reviewer result: %w", err))
+	}
+	if err := validateReviewerResultPayload(payload); err != nil {
+		return reviewPreflightError(err)
 	}
 	var result facadeReviewerResult
 	if err := decodeFacadeJSONBytes(payload, &result); err != nil {
@@ -334,6 +372,9 @@ func readFacadeReviewerArtifacts(raw []string, storeDir string, state reviewtran
 		payload, err := readVerifiedReviewerArtifact(artifact, storeDir, state)
 		if err != nil {
 			return nil, fmt.Errorf("verify reviewer artifact %d: %w", index+1, err)
+		}
+		if err := validateReviewerResultPayload(payload); err != nil {
+			return nil, fmt.Errorf("reviewer artifact %d payload invalid: %w", index+1, err)
 		}
 		if err := decodeFacadeJSONBytes(payload, &results[index]); err != nil {
 			return nil, fmt.Errorf("parse reviewer artifact %d: %w", index+1, err)

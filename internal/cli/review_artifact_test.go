@@ -271,3 +271,106 @@ func assertArtifactFinalizeUnchanged(t *testing.T, repo, lineage string, store r
 		t.Fatal("artifact mismatch mutated authority")
 	}
 }
+
+func TestValidateReviewerResultPayloadEmptyResult(t *testing.T) {
+	for _, payload := range [][]byte{
+		nil,
+		{},
+		[]byte("   "),
+		[]byte("\n\t\r\n"),
+	} {
+		err := validateReviewerResultPayload(payload)
+		if err == nil {
+			t.Fatalf("expected error for empty payload %q, got nil", payload)
+		}
+		var payloadErr *ReviewerResultPayloadError
+		if !errors.As(err, &payloadErr) {
+			t.Fatalf("expected ReviewerResultPayloadError, got %T: %v", err, err)
+		}
+		if payloadErr.Code != "empty_result" {
+			t.Fatalf("expected code empty_result, got %q", payloadErr.Code)
+		}
+	}
+}
+
+func TestValidateReviewerResultPayloadNestedEnvelope(t *testing.T) {
+	for _, payload := range [][]byte{
+		[]byte("<task_result>\n{\"findings\":[]}\n</task_result>"),
+		[]byte("some prefix <task_result> content </task_result> suffix"),
+		[]byte("</task_result>"),
+		[]byte("<task_result>"),
+	} {
+		err := validateReviewerResultPayload(payload)
+		if err == nil {
+			t.Fatalf("expected error for nested envelope payload %q, got nil", payload)
+		}
+		var payloadErr *ReviewerResultPayloadError
+		if !errors.As(err, &payloadErr) {
+			t.Fatalf("expected ReviewerResultPayloadError, got %T: %v", err, err)
+		}
+		if payloadErr.Code != "nested_envelope" {
+			t.Fatalf("expected code nested_envelope, got %q", payloadErr.Code)
+		}
+	}
+}
+
+func TestValidateReviewerResultPayloadDistinguishesErrorCodes(t *testing.T) {
+	// Empty and nested envelope must produce distinct, non-overlapping codes.
+	emptyErr := validateReviewerResultPayload([]byte(""))
+	nestedErr := validateReviewerResultPayload([]byte("<task_result>{}</task_result>"))
+	validErr := validateReviewerResultPayload([]byte(`{"findings":[],"evidence":["ok"]}`))
+	validWithTagsErr := validateReviewerResultPayload([]byte(`{"findings":[],"evidence":["<task_result>"]}`))
+
+	if emptyErr == nil || nestedErr == nil {
+		t.Fatal("both failure modes must return errors")
+	}
+	if validErr != nil || validWithTagsErr != nil {
+		t.Fatalf("valid payloads must not error, got: %v, %v", validErr, validWithTagsErr)
+	}
+	var emptyPayloadErr, nestedPayloadErr *ReviewerResultPayloadError
+	if !errors.As(emptyErr, &emptyPayloadErr) || !errors.As(nestedErr, &nestedPayloadErr) {
+		t.Fatal("both errors must be ReviewerResultPayloadError")
+	}
+	if emptyPayloadErr.Code == nestedPayloadErr.Code {
+		t.Fatalf("error codes must differ: both are %q", emptyPayloadErr.Code)
+	}
+}
+
+func TestReviewCaptureResultRejectsEmptyPayload(t *testing.T) {
+	repo, started, _, record := newArtifactReview(t, false)
+	input := filepath.Join(t.TempDir(), "result.json")
+	validArgs := []string{"--cwd", repo, "--lineage", started.LineageID, "--target",
+		record.State.InitialSnapshot.Identity, "--lens", record.State.SelectedLenses[0], "--order", "0", "--input", input}
+
+	for _, payload := range []string{"", "   ", "\n\t"} {
+		if err := os.WriteFile(input, []byte(payload), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := RunReviewCaptureResult(validArgs, io.Discard)
+		if err == nil {
+			t.Fatalf("empty payload %q must be rejected", payload)
+		}
+		if !strings.Contains(err.Error(), "empty_result") && !strings.Contains(err.Error(), "empty") {
+			t.Fatalf("expected empty_result in error, got: %v", err)
+		}
+	}
+}
+
+func TestReviewCaptureResultRejectsNestedEnvelope(t *testing.T) {
+	repo, started, _, record := newArtifactReview(t, false)
+	input := filepath.Join(t.TempDir(), "result.json")
+	validArgs := []string{"--cwd", repo, "--lineage", started.LineageID, "--target",
+		record.State.InitialSnapshot.Identity, "--lens", record.State.SelectedLenses[0], "--order", "0", "--input", input}
+
+	payload := "<task_result>\n{\"findings\":[],\"evidence\":[\"checked\"]}\n</task_result>"
+	if err := os.WriteFile(input, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := RunReviewCaptureResult(validArgs, io.Discard)
+	if err == nil {
+		t.Fatal("nested envelope payload must be rejected")
+	}
+	if !strings.Contains(err.Error(), "nested_envelope") && !strings.Contains(err.Error(), "envelope") {
+		t.Fatalf("expected nested_envelope in error, got: %v", err)
+	}
+}
