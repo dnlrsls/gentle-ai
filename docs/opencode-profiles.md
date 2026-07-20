@@ -41,6 +41,35 @@ Gentle AI does not currently write process environment variables into `opencode.
 
 Open OpenCode and press **Tab** -- your new orchestrator appears alongside `gentle-orchestrator`, the default OpenCode SDD conductor.
 
+### Local Ollama and LM Studio models
+
+For local OpenAI-compatible providers, declare tool-capable models with `"tool_call": true` in `opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "name": "Ollama (local)",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "baseURL": "http://localhost:11434/v1"
+      },
+      "models": {
+        "qwen3-coder:30b": {
+          "name": "Qwen3 Coder 30B",
+          "tool_call": true
+        }
+      }
+    }
+  }
+}
+```
+
+Gentle AI only includes custom models explicitly marked with `"tool_call": true` in the SDD model picker. Use the same structure for LM Studio with its local base URL.
+
+Do not mark embedding, OCR, or other non-tool-capable models as tool-capable. SDD agents require tool calling and will fail when assigned an incompatible model.
+
 ### Reasoning effort levels (per-model variants)
 
 For models that expose reasoning effort variants (e.g. OpenAI `gpt-5` with `low`/`medium`/`high`/`xhigh`), the picker shows an extra **Select reasoning effort level** step right after you choose the model. Pick `default` to use the provider's default, or pick a specific level to lock the assignment to that effort.
