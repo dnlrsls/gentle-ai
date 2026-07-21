@@ -4,6 +4,7 @@ package filemerge
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io/fs"
 	"os"
@@ -32,6 +33,57 @@ func TestDenyGroupApplies(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeniesAccessRightsHandlesCallbackConditions(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("GetTokenUser() error = %v", err)
+	}
+
+	tests := []struct {
+		name            string
+		aceType         uint8
+		applicationData []byte
+		wantDenied      bool
+	}{
+		{"plain callback deny", accessDeniedCallbackACEType, nil, true},
+		{"conditional callback deny", accessDeniedCallbackACEType, []byte{'a', 'r', 't', 'x'}, true},
+		{"plain callback-object deny", accessDeniedCallbackObjectACEType, nil, true},
+		{"conditional callback-object deny", accessDeniedCallbackObjectACEType, []byte{'a', 'r', 't', 'x'}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dacl := callbackDenyACL(t, tt.aceType, windows.DELETE, user.User.Sid, tt.applicationData)
+			got, err := deniesAccessRights(dacl, windows.DELETE)
+			if err != nil {
+				t.Fatalf("deniesAccessRights() error = %v", err)
+			}
+			if got != tt.wantDenied {
+				t.Fatalf("deniesAccessRights() = %t, want %t", got, tt.wantDenied)
+			}
+		})
+	}
+}
+
+func callbackDenyACL(t *testing.T, aceType uint8, mask windows.ACCESS_MASK, sid *windows.SID, applicationData []byte) *windows.ACL {
+	t.Helper()
+	const aclRevisionDS = 4
+	sidOffset := accessDeniedACEPrefixSize
+	if aceType == accessDeniedCallbackObjectACEType {
+		sidOffset += accessDeniedObjectFlagsSize
+	}
+	aceSize := sidOffset + sid.Len() + len(applicationData)
+	aclBytes := make([]byte, 8+aceSize)
+	aclBytes[0] = aclRevisionDS
+	binary.LittleEndian.PutUint16(aclBytes[2:4], uint16(len(aclBytes)))
+	binary.LittleEndian.PutUint16(aclBytes[4:6], 1)
+	aclBytes[8] = aceType
+	binary.LittleEndian.PutUint16(aclBytes[10:12], uint16(aceSize))
+	binary.LittleEndian.PutUint32(aclBytes[12:16], uint32(mask))
+	copy(aclBytes[8+sidOffset:], unsafe.Slice((*byte)(unsafe.Pointer(sid)), sid.Len()))
+	copy(aclBytes[8+sidOffset+sid.Len():], applicationData)
+	return (*windows.ACL)(unsafe.Pointer(&aclBytes[0]))
 }
 
 func createAtomicTempWithRelaxedACL(dir, target string) (*os.File, func() error, error) {
