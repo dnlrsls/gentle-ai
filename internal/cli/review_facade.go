@@ -46,16 +46,18 @@ type ReviewFacadeStartResult struct {
 }
 
 // ReviewFacadeLensBinding pairs one selected lens with its frozen zero-based
-// order so orchestrators build capture bindings exclusively from START output.
+// order and canonical repository so orchestrators build capture bindings
+// exclusively from START output.
 type ReviewFacadeLensBinding struct {
-	Lens  string `json:"lens"`
-	Order int    `json:"order"`
+	Lens       string `json:"lens"`
+	Order      int    `json:"order"`
+	Repository string `json:"repository,omitempty"`
 }
 
-func facadeLensBindings(lenses []string) []ReviewFacadeLensBinding {
+func facadeLensBindings(repository string, lenses []string) []ReviewFacadeLensBinding {
 	bindings := make([]ReviewFacadeLensBinding, len(lenses))
 	for order, lens := range lenses {
-		bindings[order] = ReviewFacadeLensBinding{Lens: lens, Order: order}
+		bindings[order] = ReviewFacadeLensBinding{Lens: lens, Order: order, Repository: repository}
 	}
 	return bindings
 }
@@ -441,7 +443,7 @@ func runReviewStatus(ctx context.Context, args []string, stdout io.Writer) error
 					}
 				}
 			}
-			transition := newReviewNextTransition(result, native.SelectedLenses, artifacts, evidenceAvailable, artifactErr, reviewNextTransitionInput{Gate: reviewtransaction.GateKind(*gate), Successor: *recoverySuccessor, Reason: *recoveryReason, Actor: *recoveryActor, Authorization: *recoveryAuthorization})
+			transition := newReviewNextTransition(result, native.SelectedLenses, artifacts, evidenceAvailable, artifactErr, reviewNextTransitionInput{Gate: reviewtransaction.GateKind(*gate), Successor: *recoverySuccessor, Reason: *recoveryReason, Actor: *recoveryActor, Authorization: *recoveryAuthorization, Repository: root})
 			result.NextTransition = &transition
 		}
 		if err := result.Validate(); err != nil {
@@ -838,7 +840,7 @@ func runReviewFacadeStart(ctx context.Context, args []string, stdout io.Writer) 
 	legacyResult := ReviewFacadeStartResult{
 		Operation: "review/start", Action: string(started.Action), LensesRequired: started.LensesRequired,
 		LineageID: authority.LineageID, State: authority.State, RiskLevel: authority.RiskLevel,
-		SelectedLenses: append([]string{}, authority.SelectedLenses...), LensBindings: facadeLensBindings(authority.SelectedLenses),
+		SelectedLenses: append([]string{}, authority.SelectedLenses...), LensBindings: facadeLensBindings("", authority.SelectedLenses),
 		Projection:   facadeProjection(authority.InitialSnapshot.Projection),
 		ChangedFiles: len(authority.InitialSnapshot.Paths), TargetIdentity: authority.InitialSnapshot.Identity,
 		ChangedLines: authority.OriginalChangedLines, CorrectionBudget: authority.CorrectionBudget,
@@ -860,6 +862,7 @@ func runReviewFacadeStart(ctx context.Context, args []string, stdout io.Writer) 
 			return fmt.Errorf("classify authoritative negotiated START target: %w", err)
 		}
 	}
+	legacyResult.LensBindings = facadeLensBindings(root, authority.SelectedLenses)
 	negotiatedResult, err := newReviewIntegrationStartResult(legacyResult, assessment, authority.InitialSnapshot.Kind)
 	if err != nil {
 		return err
@@ -2074,7 +2077,7 @@ func encodeCompactFacadeFinalize(stdout io.Writer, negotiated, actionEligibility
 	var transition *ReviewNextTransition
 	if nextTransition {
 		artifacts, artifactErr := discoverCapturedReviewerArtifacts(store.Dir, state)
-		value := reviewFinalizeNextTransition(state, revision, artifacts, artifactErr)
+		value := reviewFinalizeNextTransition(state, revision, artifacts, artifactErr, store.Repository())
 		transition = &value
 	}
 	result := ReviewFacadeFinalizeResult{

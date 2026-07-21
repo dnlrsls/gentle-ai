@@ -583,6 +583,43 @@ func TestReviewFacadeStartUnnegotiatedJSONFieldSetRemainsCompatible(t *testing.T
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unnegotiated start fields = %v, want %v", got, want)
 	}
+	var bindings []map[string]json.RawMessage
+	if err := json.Unmarshal(fields["lens_bindings"], &bindings); err != nil {
+		t.Fatal(err)
+	}
+	for _, binding := range bindings {
+		if len(binding) != 2 || binding["lens"] == nil || binding["order"] == nil {
+			t.Fatalf("unnegotiated lens binding fields = %v, want [lens order]", binding)
+		}
+	}
+}
+
+func TestReviewFacadeStartLensBindingsCarryCanonicalRepository(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	nested := filepath.Join(repo, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root, err := (reviewtransaction.SnapshotBuilder{Repo: nested}).ResolveRepositoryRoot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := RunReviewFacadeStart([]string{"--cwd", nested, "--contract", ReviewIntegrationContractV1}, &output); err != nil {
+		t.Fatal(err)
+	}
+	started := decodeNegotiatedReviewStart(t, output.Bytes())
+	if len(started.LensBindings) == 0 {
+		t.Fatal("START emitted no lens bindings")
+	}
+	for _, binding := range started.LensBindings {
+		if binding.Repository != root {
+			t.Fatalf("lens binding repository = %q, want canonical root %q", binding.Repository, root)
+		}
+	}
 }
 
 func TestReviewFacadeFinalizeReceiptPublicationFailureIsExactlyReplayable(t *testing.T) {

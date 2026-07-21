@@ -1,5 +1,6 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { spawn } from "node:child_process"
+import { isAbsolute } from "node:path"
 
 const REVIEW_AGENTS = new Set(["review-risk", "review-resilience", "review-readability", "review-reliability"])
 const BINDING = /^GENTLE_AI_REVIEW_BINDING (\{[^\n]+\})(?:\n|$)/
@@ -11,6 +12,7 @@ type ReviewBinding = {
   target: string
   lens: string
   order: number
+  repository?: string
 }
 
 function parseBinding(prompt: unknown, lens: string): ReviewBinding {
@@ -28,10 +30,12 @@ function parseBinding(prompt: unknown, lens: string): ReviewBinding {
   }
   const value = binding as Record<string, unknown>
   const fields = Object.keys(value).sort().join(",")
-  if (fields !== "lens,lineage,order,target" ||
+  if ((fields !== "lens,lineage,order,target" && fields !== "lens,lineage,order,repository,target") ||
       typeof value.lineage !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value.lineage) ||
       typeof value.target !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.target) ||
-      value.lens !== lens || !Number.isSafeInteger(value.order) || (value.order as number) < 0) {
+      value.lens !== lens || !Number.isSafeInteger(value.order) || (value.order as number) < 0 ||
+      (value.repository !== undefined &&
+       (typeof value.repository !== "string" || value.repository.trim() === "" || !isAbsolute(value.repository)))) {
     throw new Error("review task binding does not match the selected lens")
   }
   return value as ReviewBinding
@@ -51,7 +55,8 @@ function reviewerResult(output: unknown): string {
   return envelope[1]
 }
 
-function captureCwd(worktree: string | undefined, directory: string): string {
+function captureCwd(binding: ReviewBinding, worktree: string | undefined, directory: string): string {
+  if (binding.repository !== undefined) return binding.repository
   const override = process.env["GENTLE_AI_REVIEW_CWD"]
   if (typeof override === "string" && override.trim() !== "") return override.trim()
   return worktree || directory
@@ -102,8 +107,7 @@ async function preflightCapture(cwd: string, binding: ReviewBinding): Promise<vo
     throw new Error(
       `review capture preflight failed for lens ${binding.lens} under ${cwd}: ${errorMessage(cause)}. ` +
       `The reviewer was not launched, so its exactly-once invocation is preserved. ` +
-      `If lineage ${binding.lineage} was started in a different repository (for example a nested one), ` +
-      `set GENTLE_AI_REVIEW_CWD to that repository and relaunch the lens.`,
+      `Use the canonical repository emitted by START for lineage ${binding.lineage} and relaunch the lens.`,
     )
   }
 }
@@ -164,14 +168,15 @@ const ReviewResultArtifactsPlugin: Plugin = async ({ directory, worktree }) => (
     if (output.args.background === true) {
       throw new Error("bound review tasks must run in the foreground for native result capture")
     }
-    await preflightCapture(captureCwd(worktree, directory), parseBinding(output.args.prompt, output.args.subagent_type))
+    const binding = parseBinding(output.args.prompt, output.args.subagent_type)
+    await preflightCapture(captureCwd(binding, worktree, directory), binding)
   },
   "tool.execute.after": async (input, output) => {
     if (input.tool !== "task" || typeof input.args?.subagent_type !== "string" || !REVIEW_AGENTS.has(input.args.subagent_type)) return
     if (typeof input.args.prompt !== "string" || !BINDING.test(input.args.prompt)) return
     const lens = input.args.subagent_type
     const binding = parseBinding(input.args.prompt, lens)
-    const cwd = captureCwd(worktree, directory)
+    const cwd = captureCwd(binding, worktree, directory)
     // Extract the replayable payload exactly once, BEFORE capture: recovery
     // re-runs `review capture-result --input <preserved file>`, whose strict
     // decoder rejects the task envelope, so a capture failure must preserve

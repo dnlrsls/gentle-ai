@@ -434,14 +434,20 @@ func TestReviewResultArtifactsPluginContract(t *testing.T) {
 		`"--order", String(binding.order)`,
 		`"--input", "-"`,
 		`"--preflight"`,
-		`GENTLE_AI_REVIEW_CWD`,
+		`repository?: string`,
+		`fields !== "lens,lineage,order,target" && fields !== "lens,lineage,order,repository,target"`,
+		`value.repository !== undefined`,
+		`value.repository.trim() === ""`,
+		`if (binding.repository !== undefined) return binding.repository`,
+		`process.env["GENTLE_AI_REVIEW_CWD"]`,
+		`return worktree || directory`,
 		`"tool.execute.before"`,
 		`output.args.background === true`,
-		`await preflightCapture(captureCwd(worktree, directory), parseBinding(output.args.prompt, output.args.subagent_type))`,
+		`await preflightCapture(captureCwd(binding, worktree, directory), binding)`,
 		`!BINDING.test(input.args.prompt)`,
 		`const lens = input.args.subagent_type`,
 		`const binding = parseBinding(input.args.prompt, lens)`,
-		`const cwd = captureCwd(worktree, directory)`,
+		`const cwd = captureCwd(binding, worktree, directory)`,
 		// The replayable payload is extracted exactly once before capture, so a
 		// capture failure preserves the extracted strict JSON, never the task
 		// envelope that `review capture-result --input` would reject on replay.

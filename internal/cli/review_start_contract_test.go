@@ -41,6 +41,7 @@ func TestNegotiatedReviewStartMatchesVersionedFixture(t *testing.T) {
 		result.Operation != "review.start" || result.Action != "created" || !result.LensesRequired ||
 		result.LineageID != "review-start-fixture" || result.State != reviewtransaction.StateReviewing ||
 		result.RiskLevel != reviewtransaction.RiskHigh || !reflect.DeepEqual(result.SelectedLenses, wantLenses) ||
+		!reflect.DeepEqual(result.LensBindings, facadeLensBindings(repo, wantLenses)) ||
 		result.Projection != reviewtransaction.ProjectionWorkspace || result.ChangedFiles != 1 ||
 		result.ChangedLines != 1 || result.CorrectionBudget != 1 || !reflect.DeepEqual(result.RiskReasons, wantReasons) {
 		t.Fatalf("negotiated START = %#v\n%s", result, output.String())
@@ -49,8 +50,17 @@ func TestNegotiatedReviewStartMatchesVersionedFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(output.Bytes(), fixture) {
+	repositoryJSON, _ := json.Marshal(repo)
+	normalized := bytes.ReplaceAll(output.Bytes(), repositoryJSON, []byte(`"/repository"`))
+	if !reflect.DeepEqual(decodeNegotiatedReviewStart(t, normalized), decodeNegotiatedReviewStart(t, fixture)) {
 		t.Fatalf("START fixture mismatch:\ngot=%s\nwant=%s", output.String(), fixture)
+	}
+	var statusOutput bytes.Buffer
+	if err := RunReview([]string{"status", "--contract", ReviewIntegrationContractV1, "--next-transition", "--cwd", repo, "--lineage", result.LineageID}, &statusOutput); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(statusOutput.Bytes(), repositoryJSON) {
+		t.Fatalf("reviewer-result transition omitted repository %q: %s", repo, statusOutput.String())
 	}
 }
 

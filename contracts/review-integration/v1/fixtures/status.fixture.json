@@ -114,6 +114,10 @@
             {
               "name": "order",
               "value": "0"
+            },
+            {
+              "name": "repository",
+              "value": "/repository"
             }
           ]
         }

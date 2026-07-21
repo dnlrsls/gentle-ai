@@ -98,7 +98,7 @@ func newReviewNextTransition(status ReviewTargetStatusResult, selectedLenses []s
 			return reviewStopTransition("captured_artifacts_unverifiable")
 		}
 		if len(artifacts) != len(selectedLenses) {
-			return reviewMissingCaptureTransition(binding, selectedLenses, artifacts)
+			return reviewMissingCaptureTransition(binding, selectedLenses, artifacts, input.Repository)
 		}
 		return reviewExecuteTransition("captured_results_ready", "review.finalize", []ReviewTransitionArgument{
 			{Name: "lineage", Value: binding.LineageID}, {Name: "captured_results", Value: "true"},
@@ -145,7 +145,7 @@ func newReviewNextTransition(status ReviewTargetStatusResult, selectedLenses []s
 	}
 }
 
-func reviewFinalizeNextTransition(state reviewtransaction.CompactState, revision string, artifacts []ReviewTransitionArtifact, artifactErr error) ReviewNextTransition {
+func reviewFinalizeNextTransition(state reviewtransaction.CompactState, revision string, artifacts []ReviewTransitionArtifact, artifactErr error, repository string) ReviewNextTransition {
 	status := ReviewTargetStatusResult{
 		Applicability:  reviewtransaction.TargetApplicabilityCurrent,
 		Authority:      &ReviewTargetStatusAuthority{LineageID: state.LineageID, Revision: revision, State: state.State},
@@ -153,7 +153,7 @@ func reviewFinalizeNextTransition(state reviewtransaction.CompactState, revision
 		Frozen:         &ReviewTargetStatusFrozen{Tier: state.RiskLevel},
 	}
 	if state.State == reviewtransaction.StateReviewing && artifactErr == nil && len(artifacts) != len(state.SelectedLenses) {
-		return reviewMissingCaptureTransition(reviewTransitionBinding(status.Authority, status.TargetIdentity), state.SelectedLenses, artifacts)
+		return reviewMissingCaptureTransition(reviewTransitionBinding(status.Authority, status.TargetIdentity), state.SelectedLenses, artifacts, repository)
 	}
 	if state.State == reviewtransaction.StateReviewing && artifactErr == nil {
 		return reviewExecuteTransition("captured_results_ready", "review.finalize", []ReviewTransitionArgument{{Name: "lineage", Value: state.LineageID}, {Name: "captured_results", Value: "true"}}, []ReviewTransitionArgument{{Name: "state", Value: "reviewing"}, {Name: "captured_artifacts", Value: "complete"}}, reviewTransitionBinding(status.Authority, status.TargetIdentity), artifacts)
@@ -161,7 +161,7 @@ func reviewFinalizeNextTransition(state reviewtransaction.CompactState, revision
 	return newReviewNextTransition(status, state.SelectedLenses, artifacts, false, artifactErr, reviewNextTransitionInput{})
 }
 
-func reviewMissingCaptureTransition(binding ReviewTransitionBinding, selectedLenses []string, artifacts []ReviewTransitionArtifact) ReviewNextTransition {
+func reviewMissingCaptureTransition(binding ReviewTransitionBinding, selectedLenses []string, artifacts []ReviewTransitionArtifact, repository string) ReviewNextTransition {
 	captured := make(map[int]bool, len(artifacts))
 	for _, artifact := range artifacts {
 		captured[artifact.SelectedOrder] = true
@@ -169,7 +169,7 @@ func reviewMissingCaptureTransition(binding ReviewTransitionBinding, selectedLen
 	inputs := make([]ReviewTransitionInput, 0)
 	for order, lens := range selectedLenses {
 		if !captured[order] {
-			inputs = append(inputs, reviewCaptureInput(binding, lens, order))
+			inputs = append(inputs, reviewCaptureInput(binding, lens, order, repository))
 		}
 	}
 	if len(inputs) == 0 {
@@ -178,16 +178,17 @@ func reviewMissingCaptureTransition(binding ReviewTransitionBinding, selectedLen
 	return reviewCollectTransition("reviewer_results_required", inputs...)
 }
 
-func reviewCaptureInput(binding ReviewTransitionBinding, lens string, order int) ReviewTransitionInput {
+func reviewCaptureInput(binding ReviewTransitionBinding, lens string, order int, repository string) ReviewTransitionInput {
 	return ReviewTransitionInput{
 		Name: "reviewer_result", Schema: reviewReviewerSchemaID, CaptureOperation: "review.capture-result",
-		Arguments: append(reviewBindingArguments(binding), ReviewTransitionArgument{Name: "lens", Value: lens}, ReviewTransitionArgument{Name: "order", Value: fmt.Sprint(order)}),
+		Arguments: append(reviewBindingArguments(binding), ReviewTransitionArgument{Name: "lens", Value: lens}, ReviewTransitionArgument{Name: "order", Value: fmt.Sprint(order)}, ReviewTransitionArgument{Name: "repository", Value: repository}),
 	}
 }
 
 type reviewNextTransitionInput struct {
 	Gate                                    reviewtransaction.GateKind
 	Successor, Reason, Actor, Authorization string
+	Repository                              string
 }
 
 func (input reviewNextTransitionInput) gate() reviewtransaction.GateKind {

@@ -24,6 +24,7 @@ type ReviewIntegrationStartResult struct {
 	State            reviewtransaction.State        `json:"state"`
 	RiskLevel        reviewtransaction.RiskLevel    `json:"risk_level"`
 	SelectedLenses   []string                       `json:"selected_lenses"`
+	LensBindings     []ReviewFacadeLensBinding      `json:"lens_bindings"`
 	Projection       reviewtransaction.Projection   `json:"projection"`
 	TargetMode       reviewtransaction.TargetKind   `json:"target_mode,omitempty"`
 	TargetIdentity   string                         `json:"target_identity,omitempty"`
@@ -46,7 +47,7 @@ func newReviewIntegrationStartResult(legacy ReviewFacadeStartResult, assessment 
 	result := ReviewIntegrationStartResult{
 		Schema: ReviewIntegrationStartSchema, Contract: ReviewIntegrationContractV1, Operation: "review.start",
 		Action: legacy.Action, LensesRequired: legacy.LensesRequired, LineageID: legacy.LineageID,
-		State: legacy.State, RiskLevel: legacy.RiskLevel, SelectedLenses: append([]string{}, legacy.SelectedLenses...),
+		State: legacy.State, RiskLevel: legacy.RiskLevel, SelectedLenses: append([]string{}, legacy.SelectedLenses...), LensBindings: append([]ReviewFacadeLensBinding{}, legacy.LensBindings...),
 		Projection: legacy.Projection, ChangedFiles: legacy.ChangedFiles, ChangedLines: legacy.ChangedLines,
 		CorrectionBudget: legacy.CorrectionBudget, RiskReasons: append([]reviewtransaction.RiskReason{}, assessment.Reasons...),
 	}
@@ -95,7 +96,7 @@ func (result ReviewIntegrationStartResult) Validate() error {
 	if result.Schema != ReviewIntegrationStartSchema || result.Contract != ReviewIntegrationContractV1 || result.Operation != "review.start" {
 		return errors.New("invalid negotiated START identity")
 	}
-	if strings.TrimSpace(result.LineageID) == "" || result.SelectedLenses == nil || result.RiskReasons == nil {
+	if strings.TrimSpace(result.LineageID) == "" || result.SelectedLenses == nil || result.LensBindings == nil || result.RiskReasons == nil {
 		return errors.New("negotiated START response is incomplete")
 	}
 	switch result.Action {

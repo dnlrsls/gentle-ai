@@ -13,6 +13,10 @@
     "review-readability",
     "review-reliability"
   ],
+  "lens_bindings": [
+    {"lens": "review-risk", "order": 0, "repository": "/repository"}, {"lens": "review-resilience", "order": 1, "repository": "/repository"},
+    {"lens": "review-readability", "order": 2, "repository": "/repository"}, {"lens": "review-reliability", "order": 3, "repository": "/repository"}
+  ],
   "projection": "workspace",
   "changed_files": 1,
   "changed_lines": 1,

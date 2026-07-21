@@ -20,6 +20,7 @@
     "state",
     "risk_level",
     "selected_lenses",
+    "lens_bindings",
     "projection",
     "changed_files",
     "changed_lines",
@@ -57,6 +58,7 @@
       "uniqueItems": true,
       "items": {"enum": ["review-risk", "review-resilience", "review-readability", "review-reliability"]}
     },
+    "lens_bindings": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["lens", "order", "repository"], "properties": {"lens": {"type": "string"}, "order": {"type": "integer", "minimum": 0}, "repository": {"type": "string", "minLength": 1}}}},
     "projection": {"enum": ["workspace", "staged"]},
     "target_mode": {"const": "base-workspace-overlay"},
     "target_identity": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},

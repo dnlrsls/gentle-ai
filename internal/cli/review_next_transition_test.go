@@ -143,7 +143,7 @@ func TestReviewNextTransitionStateTable(t *testing.T) {
 		{"corrupt", status(reviewtransaction.TargetApplicabilityCorrupted, "", reviewtransaction.TargetStatusActionRepairAuthority, reviewtransaction.ReplayabilityManualActionRequired), nil, nil, reviewNextTransitionStop, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			input := reviewNextTransitionInput{}
+			input := reviewNextTransitionInput{Repository: t.TempDir()}
 			if tt.status.Authority.State == reviewtransaction.StateApproved {
 				tt.status.Receipt.Status = ReviewReceiptPresent
 			}

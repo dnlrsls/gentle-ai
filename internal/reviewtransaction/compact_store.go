@@ -1028,7 +1028,8 @@ func compactStartScopeCompatible(ctx context.Context, repo string, existing, req
 		assessment.ChangedLines == requested.OriginalChangedLines
 }
 
-func (store CompactStore) StatePath() string { return filepath.Join(store.Dir, compactStateFileName) }
+func (store CompactStore) StatePath() string  { return filepath.Join(store.Dir, compactStateFileName) }
+func (store CompactStore) Repository() string { return store.repo }
 
 func (store CompactStore) ReceiptPath() string {
 	return filepath.Join(store.Dir, compactReceiptFileName)

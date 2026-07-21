@@ -53,7 +53,18 @@ func TestReviewCaptureResultNestedRepositoryFailsActionablyAndStaysRetriable(t *
 	if err := os.WriteFile(filepath.Join(child, "tracked.txt"), []byte("candidate\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	started := startFacadeReview(t, child)
+	started := runNegotiatedReviewStart(t, child, "nested-repository-capture")
+	if len(started.LensBindings) == 0 {
+		t.Fatal("START emitted no lens bindings")
+	}
+	binding := started.LensBindings[0]
+	childRoot, err := (reviewtransaction.SnapshotBuilder{Repo: child}).ResolveRepositoryRoot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.Repository != childRoot {
+		t.Fatalf("bound repository = %q, want %q", binding.Repository, childRoot)
+	}
 	store, _ := reviewtransaction.CompactAuthoritativeStore(context.Background(), child, started.LineageID)
 	record, err := store.Load()
 	if err != nil {
@@ -66,7 +77,7 @@ func TestReviewCaptureResultNestedRepositoryFailsActionablyAndStaysRetriable(t *
 	args := func(cwd string, rest ...string) []string {
 		return append([]string{
 			"--cwd", cwd, "--lineage", started.LineageID, "--target", record.State.InitialSnapshot.Identity,
-			"--lens", record.State.SelectedLenses[0], "--order", "0",
+			"--lens", binding.Lens, "--order", "0",
 		}, rest...)
 	}
 	parentRoot, err := (reviewtransaction.SnapshotBuilder{Repo: parent}).ResolveRepositoryRoot(context.Background())
@@ -85,7 +96,7 @@ func TestReviewCaptureResultNestedRepositoryFailsActionablyAndStaysRetriable(t *
 	// The failed parent-repository capture must not consume the exactly-once
 	// native lens slot: the same capture succeeds from the reviewing repository.
 	var output bytes.Buffer
-	if err := RunReviewCaptureResult(args(child, "--input", input), &output); err != nil {
+	if err := RunReviewCaptureResult(args(binding.Repository, "--input", input), &output); err != nil {
 		t.Fatalf("retry from reviewing repository failed: %v", err)
 	}
 	manifest := strings.TrimSpace(output.String())

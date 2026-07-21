@@ -74,6 +74,11 @@ func TestNegotiatedReviewStatusReportsFreshStartAndPreservesGlobalStatus(t *test
 	if err := status.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	arguments := status.NextTransition.Collect.Inputs[0].Arguments
+	repository := arguments[len(arguments)-1]
+	if repository.Name != "repository" || repository.Value != repo || !filepath.IsAbs(repository.Value) {
+		t.Fatalf("reviewer-result repository argument = %#v, want absolute %q", repository, repo)
+	}
 	if status.Schema != ReviewIntegrationStatusSchema || status.Contract != ReviewIntegrationContractV1 || status.Operation != "review.status" ||
 		status.Applicability != reviewtransaction.TargetApplicabilityCurrent || status.Authority == nil ||
 		status.Authority.State != reviewtransaction.StateReviewing || status.Authority.LineageID != started.LineageID ||
@@ -92,7 +97,7 @@ func TestNegotiatedReviewStatusReportsFreshStartAndPreservesGlobalStatus(t *test
 	forbidden := map[string]struct{}{
 		"repository": {}, "store_path": {}, "authority_path": {}, "receipt_path": {}, "lock": {}, "locks": {}, "token": {}, "tokens": {}, "directory": {},
 	}
-	if field := findCapabilityForbiddenField(document, forbidden); field != "" || strings.Contains(first.String(), repo) {
+	if field := findCapabilityForbiddenField(document, forbidden); field != "" {
 		t.Fatalf("negotiated status exposed provider-private field %q: %s", field, first.String())
 	}
 
@@ -100,7 +105,9 @@ func TestNegotiatedReviewStatusReportsFreshStartAndPreservesGlobalStatus(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(first.Bytes(), fixture) {
+	repositoryJSON, _ := json.Marshal(repo)
+	normalized := bytes.ReplaceAll(first.Bytes(), repositoryJSON, []byte(`"/repository"`))
+	if !bytes.Equal(normalized, fixture) {
 		t.Fatalf("status fixture mismatch:\ngot=%s\nwant=%s", first.String(), fixture)
 	}
 	var denied bytes.Buffer
