@@ -425,22 +425,20 @@ func TestNewModelPiOnlyConfiguredSelectionPreservesComponents(t *testing.T) {
 
 	m := NewModel(detection, "dev", state.InstallState{InstalledAgents: []string{string(model.AgentPi)}, SelectionConfigured: true, Components: []model.ComponentID{model.ComponentEngram}})
 
-	wantAgents := []model.AgentID{model.AgentPi}
-	if !reflect.DeepEqual(m.Selection.Agents, wantAgents) {
-		t.Fatalf("agents = %v, want %v", m.Selection.Agents, wantAgents)
+	if !reflect.DeepEqual(m.Selection.Agents, []model.AgentID{model.AgentPi}) {
+		t.Fatalf("agents = %v, want [pi]", m.Selection.Agents)
 	}
-	wantComponents := []model.ComponentID{model.ComponentEngram}
-	if !reflect.DeepEqual(m.Selection.Components, wantComponents) {
-		t.Fatalf("components = %v, want %v", m.Selection.Components, wantComponents)
+	if !reflect.DeepEqual(m.Selection.Components, []model.ComponentID{model.ComponentEngram}) {
+		t.Fatalf("components = %v, want [engram]", m.Selection.Components)
 	}
 	m.Screen, m.Cursor = ScreenAgents, len(screensAgentOptions())
-	if updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); !reflect.DeepEqual(updated.(Model).Selection.Components, wantComponents) {
-		t.Fatalf("continued components = %v, want %v", updated.(Model).Selection.Components, wantComponents)
+	if updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); !reflect.DeepEqual(updated.(Model).Selection.Components, []model.ComponentID{model.ComponentEngram}) {
+		t.Fatalf("continued components = %v, want [engram]", updated.(Model).Selection.Components)
 	}
 }
 
 func TestNewModelPiOnlyConfiguredSelectionPreservesPersona(t *testing.T) {
-	for _, persona := range []model.PersonaID{model.PersonaNeutral, model.PersonaCustom} {
+	for _, persona := range []model.PersonaID{model.PersonaNeutral, model.PersonaCustom, model.PersonaID("unsupported")} {
 		t.Run(string(persona), func(t *testing.T) {
 			m := NewModel(system.DetectionResult{}, "dev", state.InstallState{InstalledAgents: []string{string(model.AgentPi)}, SelectionConfigured: true, Components: []model.ComponentID{model.ComponentEngram}, Persona: string(persona)})
 			m.Screen, m.Cursor = ScreenAgents, len(screensAgentOptions())

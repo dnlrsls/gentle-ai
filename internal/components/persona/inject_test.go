@@ -2957,7 +2957,7 @@ func TestPiPersonaConfigFollowsSelectedPersona(t *testing.T) {
 		{
 			name:        "legacy artifact persona maps to gentleman and preserves sibling fields",
 			persona:     model.PersonaGentlemanNeutralArtifacts,
-			existing:    `{"userSetting":true,"mode":"neutral"}`,
+			existing:    `{"userSetting":true,"largeNumber":9007199254740993,"mode":"neutral"}`,
 			wantMode:    "gentleman",
 			wantChanged: true,
 		},
@@ -3041,8 +3041,8 @@ func TestPiPersonaConfigFollowsSelectedPersona(t *testing.T) {
 				if config["mode"] != tt.wantMode {
 					t.Fatalf("mode = %q, want %q", config["mode"], tt.wantMode)
 				}
-				if tt.existing != "" && config["userSetting"] != true {
-					t.Fatal("Pi persona config did not preserve userSetting")
+				if tt.existing != "" && (config["userSetting"] != true || (strings.Contains(tt.existing, "largeNumber") && !strings.Contains(string(content), "9007199254740993"))) {
+					t.Fatal("Pi persona config did not preserve sibling fields")
 				}
 			}
 			if _, statErr := os.Stat(filepath.Join(home, ".pi", "agent", "APPEND_SYSTEM.md")); !os.IsNotExist(statErr) {

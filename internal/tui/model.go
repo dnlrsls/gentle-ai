@@ -665,11 +665,8 @@ func NewModel(detection system.DetectionResult, version string, installState ...
 		ModelAssignments:       installStateModelAssignments(s.ModelAssignments),
 	}
 	s.RestoreSelection(&selection)
-	if isPiOnlyAgents(agents) && s.SelectionConfigured {
-		switch persona := model.PersonaID(s.Persona); persona {
-		case model.PersonaGentleman, model.PersonaGentlemanNeutralArtifacts, model.PersonaNeutral, model.PersonaCustom:
-			selection.Persona = persona
-		}
+	if isPiOnlyAgents(agents) && s.SelectionConfigured && s.Persona != "" {
+		selection.Persona = model.PersonaID(s.Persona)
 	}
 
 	return Model{

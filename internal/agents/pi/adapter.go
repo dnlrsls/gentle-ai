@@ -2,9 +2,11 @@
 package pi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -361,8 +363,13 @@ func readPiPersonaJSONObject(path string) (map[string]any, error) {
 	}
 
 	var config map[string]any
-	if err := json.Unmarshal(content, &config); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	if err := decoder.Decode(&config); err != nil {
 		return nil, fmt.Errorf("unmarshal Pi persona config %q: %w", path, err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("unmarshal Pi persona config %q: trailing data", path)
 	}
 	if config == nil {
 		return nil, fmt.Errorf("unmarshal Pi persona config %q: must be a JSON object", path)
