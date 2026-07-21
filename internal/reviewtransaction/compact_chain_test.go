@@ -28,6 +28,23 @@ func TestCompactPrePRChainAllowsExactThreeReceiptComposition(t *testing.T) {
 	}
 }
 
+func TestCompactPrePRChainAllowsAcceptedDegenerateScopeRecovery(t *testing.T) {
+	fixture := newCompactPrePRChainFixture(t, 2)
+	successor, receipt := recoverApprovedCompactSuccessor(t, fixture.repo, fixture.states[1].LineageID, "compact-chain-recovery", 2)
+	if receipt.BaseTree != receipt.FinalCandidateTree {
+		t.Fatalf("recovery receipt is not degenerate: %#v", receipt)
+	}
+
+	got, attempted := EvaluateCompactPrePRChain(context.Background(), fixture.repo, fixture.input())
+
+	if !attempted || got.Result != GateAllow {
+		t.Fatalf("accepted degenerate scope recovery = %#v, attempted %t, successor %s", got, attempted, successor.LineageID)
+	}
+	if got.Context.BaseTree != fixture.receipts[0].BaseTree || got.Context.CandidateTree != fixture.receipts[1].FinalCandidateTree {
+		t.Fatalf("recovered composed proof context = %#v", got.Context)
+	}
+}
+
 func TestCompactPrePRChainLeavesExactSingleReceiptToDirectEvaluation(t *testing.T) {
 	fixture := newCompactPrePRChainFixture(t, 1)
 	input := fixture.input()

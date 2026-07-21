@@ -149,7 +149,8 @@ func deriveCompactPrePRChain(ctx context.Context, repo string, input NativeGateR
 		leafSet[store.lineageID] = struct{}{}
 	}
 	authority := make([]compactPrePRChainAuthorityProof, 0, len(stores))
-	members := make([]compactPrePRChainMember, 0, len(stores))
+	approvedMembers := make(map[string]compactPrePRChainMember, len(stores))
+	leafMembers := make([]compactPrePRChainMember, 0, len(leaves))
 	for _, store := range stores {
 		statePayload, readErr := os.ReadFile(store.StatePath())
 		if readErr != nil {
@@ -175,8 +176,12 @@ func deriveCompactPrePRChain(ctx context.Context, repo string, input NativeGateR
 				return compactPrePRChainDerivation{}, true, fmt.Errorf("compact receipt %q does not match current authority", store.lineageID)
 			}
 			proof.ReceiptHash = compactPrePRChainPayloadHash("receipt", receiptPayload)
-			if _, leaf := leafSet[store.lineageID]; leaf && record.State.State == StateApproved {
-				members = append(members, compactPrePRChainMember{store: store, record: record, receipt: receipt})
+			if record.State.State == StateApproved {
+				member := compactPrePRChainMember{store: store, record: record, receipt: receipt}
+				approvedMembers[store.lineageID] = member
+				if _, leaf := leafSet[store.lineageID]; leaf {
+					leafMembers = append(leafMembers, member)
+				}
 			}
 		} else if receiptErr == nil {
 			return compactPrePRChainDerivation{}, true, fmt.Errorf("nonterminal compact authority %q has a receipt", store.lineageID)
@@ -184,6 +189,19 @@ func deriveCompactPrePRChain(ctx context.Context, repo string, input NativeGateR
 			return compactPrePRChainDerivation{}, true, receiptErr
 		}
 		authority = append(authority, proof)
+	}
+	members := make([]compactPrePRChainMember, 0, len(leafMembers))
+	for _, member := range leafMembers {
+		recovery := member.record.State.Recovery
+		if recovery != nil && recovery.Disposition == RecoveryScopeChanged &&
+			member.receipt.BaseTree == member.receipt.FinalCandidateTree && member.receipt.FixDeltaHash == EmptyFixDeltaHash {
+			predecessor, recovered := approvedMembers[recovery.PredecessorLineageID]
+			if recovered && predecessor.receipt.FinalCandidateTree == member.receipt.BaseTree {
+				members = append(members, predecessor)
+				continue
+			}
+		}
+		members = append(members, member)
 	}
 	if len(members) < 2 {
 		return compactPrePRChainDerivation{}, true, errors.New("no receipt chain contains at least two authoritative approved members")
