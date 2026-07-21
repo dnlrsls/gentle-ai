@@ -110,7 +110,7 @@ func TestReviewStartContractValidatesProcessBoundaryReason(t *testing.T) {
 }
 
 func TestNegotiatedReviewStartResumesFrozenMediumAuthorityAfterClassifierUpgrade(t *testing.T) {
-	legacy := ReviewFacadeStartResult{Action: string(reviewtransaction.CompactStartResumed), LineageID: "pre-upgrade", RiskLevel: reviewtransaction.RiskMedium, SelectedLenses: []string{reviewtransaction.LensReliability}, Projection: reviewtransaction.ProjectionWorkspace, ChangedFiles: 1, ChangedLines: 20, CorrectionBudget: 10}
+	legacy := ReviewFacadeStartResult{Action: string(reviewtransaction.CompactStartResumed), LineageID: "pre-upgrade", RiskLevel: reviewtransaction.RiskMedium, SelectedLenses: []string{reviewtransaction.LensReliability}, LensBindings: facadeLensBindings("", []string{reviewtransaction.LensReliability}), Projection: reviewtransaction.ProjectionWorkspace, TargetIdentity: "sha256:" + strings.Repeat("a", 64), ChangedFiles: 1, ChangedLines: 20, CorrectionBudget: 10}
 	assessment := reviewtransaction.RiskAssessment{Level: reviewtransaction.RiskHigh, ChangedLines: 20, Reasons: []reviewtransaction.RiskReason{{Code: reviewtransaction.RiskReasonCode("process_boundary"), Signal: reviewtransaction.SignalShellProcess, Path: "runner.py"}}}
 	diff, err := reviewtransaction.NewFrozenCandidateDiff([]byte("diff"))
 	if err != nil {

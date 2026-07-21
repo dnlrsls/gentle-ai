@@ -24,6 +24,10 @@ func TestBoundedReviewContractLeavesCanonicalizationToNativeGo(t *testing.T) {
 		"models never construct canonical bytes or hashes",
 		"Freeze merged findings",
 		"append the exact immutable candidate diff and changed-path manifest",
+		"construct `GENTLE_AI_REVIEW_BINDING` directly from the matching lens binding",
+		"Repository is optional in the existing v1 reader contract",
+		"GENTLE_AI_REVIEW_CWD",
+		"The legacy four-field binding remains accepted",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("orchestrator contract missing %q", want)
@@ -181,8 +185,8 @@ func TestOpenCodeRenderedReviewProtocolCost(t *testing.T) {
 		wantChars     int
 		maxCharacters int
 	}{
-		{name: "standard", agents: []string{"review-reliability"}, beforeChars: 42_301, wantChars: 7_290, maxCharacters: 7_300},
-		{name: "full-4R", agents: []string{"review-risk", "review-resilience", "review-readability", "review-reliability"}, beforeChars: 106_998, wantChars: 14_481, maxCharacters: 16_000},
+		{name: "standard", agents: []string{"review-reliability"}, beforeChars: 42_301, wantChars: 7_586, maxCharacters: 7_600},
+		{name: "full-4R", agents: []string{"review-risk", "review-resilience", "review-readability", "review-reliability"}, beforeChars: 106_998, wantChars: 14_777, maxCharacters: 16_000},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

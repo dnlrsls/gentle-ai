@@ -41,17 +41,19 @@ func TestNegotiatedReviewStartMatchesVersionedFixture(t *testing.T) {
 		result.Operation != "review.start" || result.Action != "created" || !result.LensesRequired ||
 		result.LineageID != "review-start-fixture" || result.State != reviewtransaction.StateReviewing ||
 		result.RiskLevel != reviewtransaction.RiskHigh || !reflect.DeepEqual(result.SelectedLenses, wantLenses) ||
-		!reflect.DeepEqual(result.LensBindings, facadeLensBindings(repo, wantLenses)) ||
 		result.Projection != reviewtransaction.ProjectionWorkspace || result.ChangedFiles != 1 ||
 		result.ChangedLines != 1 || result.CorrectionBudget != 1 || !reflect.DeepEqual(result.RiskReasons, wantReasons) {
 		t.Fatalf("negotiated START = %#v\n%s", result, output.String())
 	}
+	assertNegotiatedReviewStartBindings(t, result)
 	fixture, err := os.ReadFile(filepath.Join("..", "..", "contracts", "review-integration", "v1", "fixtures", "start.fixture.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	repositoryJSON, _ := json.Marshal(repo)
 	normalized := bytes.ReplaceAll(output.Bytes(), repositoryJSON, []byte(`"/repository"`))
+	targetJSON, _ := json.Marshal(result.TargetIdentity)
+	normalized = bytes.ReplaceAll(normalized, targetJSON, []byte(`"sha256:0000000000000000000000000000000000000000000000000000000000000000"`))
 	if !reflect.DeepEqual(decodeNegotiatedReviewStart(t, normalized), decodeNegotiatedReviewStart(t, fixture)) {
 		t.Fatalf("START fixture mismatch:\ngot=%s\nwant=%s", output.String(), fixture)
 	}
@@ -59,8 +61,51 @@ func TestNegotiatedReviewStartMatchesVersionedFixture(t *testing.T) {
 	if err := RunReview([]string{"status", "--contract", ReviewIntegrationContractV1, "--next-transition", "--cwd", repo, "--lineage", result.LineageID}, &statusOutput); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(statusOutput.Bytes(), repositoryJSON) {
-		t.Fatalf("reviewer-result transition omitted repository %q: %s", repo, statusOutput.String())
+	var status ReviewTargetStatusResult
+	decodeStrictReviewJSON(t, statusOutput.Bytes(), &status)
+	if status.NextTransition == nil || status.NextTransition.Collect == nil || len(status.NextTransition.Collect.Inputs) != 4 {
+		t.Fatalf("reviewer-result transition = %#v", status.NextTransition)
+	}
+	wantArguments := []ReviewTransitionArgument{
+		{Name: "lineage", Value: result.LineageID},
+		{Name: "expected-revision", Value: status.Authority.Revision},
+		{Name: "target", Value: result.TargetIdentity},
+		{Name: "lens", Value: reviewtransaction.LensRisk},
+		{Name: "order", Value: "0"},
+		{Name: "repository", Value: repo},
+	}
+	if got := status.NextTransition.Collect.Inputs[0].Arguments; !reflect.DeepEqual(got, wantArguments) {
+		t.Fatalf("reviewer-result transition arguments = %#v, want %#v", got, wantArguments)
+	}
+}
+
+func TestNegotiatedReviewStartLensBindingsCoverOrdinaryAndStagedProjections(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		projection string
+	}{
+		{name: "ordinary", projection: "workspace"},
+		{name: "staged", projection: "staged"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := initReviewCLIRepo(t)
+			writeReviewStartCandidate(t, repo, "scripts/deploy.sh", "echo deploy\n", 0o644)
+			if tt.projection == "staged" {
+				runReviewCLIGit(t, repo, "add", "scripts/deploy.sh")
+			}
+			var output bytes.Buffer
+			if err := RunReview([]string{
+				"start", "--contract", ReviewIntegrationContractV1, "--cwd", repo, "--projection", tt.projection,
+				"--lineage", "review-start-binding-" + tt.name,
+			}, &output); err != nil {
+				t.Fatal(err)
+			}
+			result := decodeNegotiatedReviewStart(t, output.Bytes())
+			if result.Projection != reviewtransaction.Projection(tt.projection) {
+				t.Fatalf("projection = %q, want %q", result.Projection, tt.projection)
+			}
+			assertNegotiatedReviewStartBindings(t, result)
+		})
 	}
 }
 
@@ -255,6 +300,7 @@ func TestNegotiatedReviewStartAndStatusExposeWorkspaceOverlay(t *testing.T) {
 		start.TargetIdentity != status.TargetIdentity || start.BaseTree != status.Projection.BaseTree || start.CandidateTree != status.Projection.CurrentCandidateTree {
 		t.Fatalf("overlay START/status mismatch: start=%#v status=%#v", start, status)
 	}
+	assertNegotiatedReviewStartBindings(t, start)
 	for _, selector := range [][]string{
 		{"--contract", ReviewIntegrationContractV1, "--cwd", repo, "--workspace-overlay"},
 		{"--contract", ReviewIntegrationContractV1, "--cwd", repo, "--base-ref", base, "--base-tree", start.BaseTree, "--workspace-overlay"},
@@ -660,6 +706,9 @@ func TestNegotiatedReviewStartPreservesLegacyPayloadAndAuthorityIdentity(t *test
 	if legacy.Operation != "review/start" {
 		t.Fatalf("legacy operation = %q", legacy.Operation)
 	}
+	if !reflect.DeepEqual(legacy.LensBindings, facadeLensBindings("", legacy.SelectedLenses)) {
+		t.Fatalf("legacy START bindings = %#v, want four-field task binding source", legacy.LensBindings)
+	}
 
 	var negotiatedOutput bytes.Buffer
 	if err := RunReview([]string{
@@ -817,6 +866,19 @@ func TestNegotiatedReviewStartSchemaAndFixtureAreStrict(t *testing.T) {
 	if err := result.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	assertNegotiatedReviewStartBindings(t, result)
+	withoutRepository := result
+	withoutRepository.LensBindings = append([]ReviewFacadeLensBinding(nil), result.LensBindings...)
+	for index := range withoutRepository.LensBindings {
+		withoutRepository.LensBindings[index].Repository = ""
+	}
+	payload, err := json.Marshal(withoutRepository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded := decodeNegotiatedReviewStart(t, payload); decoded.Validate() != nil {
+		t.Fatalf("negotiated v1 binding without repository failed validation: %#v", decoded)
+	}
 	for _, mutate := range []func(*ReviewIntegrationStartResult){
 		func(value *ReviewIntegrationStartResult) {
 			value.TargetMode = reviewtransaction.TargetBaseWorkspaceOverlay
@@ -824,8 +886,19 @@ func TestNegotiatedReviewStartSchemaAndFixtureAreStrict(t *testing.T) {
 		func(value *ReviewIntegrationStartResult) { value.TargetIdentity = "sha256:" + strings.Repeat("a", 64) },
 		func(value *ReviewIntegrationStartResult) { value.BaseTree = strings.Repeat("a", 40) },
 		func(value *ReviewIntegrationStartResult) { value.CandidateTree = strings.Repeat("a", 40) },
+		func(value *ReviewIntegrationStartResult) { value.TargetIdentity = "" },
+		func(value *ReviewIntegrationStartResult) { value.LensBindings[0].Lineage = "wrong-lineage" },
+		func(value *ReviewIntegrationStartResult) {
+			value.LensBindings[0].Target = "sha256:" + strings.Repeat("a", 64)
+		},
+		func(value *ReviewIntegrationStartResult) {
+			value.LensBindings[0].Lens = reviewtransaction.LensReliability
+		},
+		func(value *ReviewIntegrationStartResult) { value.LensBindings[0].Order = 1 },
+		func(value *ReviewIntegrationStartResult) { value.LensBindings[0].Repository = " " },
 	} {
 		invalid := result
+		invalid.LensBindings = append([]ReviewFacadeLensBinding(nil), result.LensBindings...)
 		mutate(&invalid)
 		if err := invalid.Validate(); err == nil {
 			t.Fatalf("START accepted partial overlay identity: %#v", invalid)
@@ -871,6 +944,19 @@ func decodeNegotiatedReviewStart(t *testing.T, payload []byte) ReviewIntegration
 		t.Fatal(err)
 	}
 	return result
+}
+
+func assertNegotiatedReviewStartBindings(t *testing.T, result ReviewIntegrationStartResult) {
+	t.Helper()
+	if !validReviewCapabilitySHA256(result.TargetIdentity) || len(result.LensBindings) != len(result.SelectedLenses) {
+		t.Fatalf("negotiated START binding identity = target %q, bindings %#v, lenses %v", result.TargetIdentity, result.LensBindings, result.SelectedLenses)
+	}
+	for order, lens := range result.SelectedLenses {
+		binding := result.LensBindings[order]
+		if binding.Lineage != result.LineageID || binding.Target != result.TargetIdentity || binding.Lens != lens || binding.Order != order {
+			t.Fatalf("negotiated START binding[%d] = %#v, lineage %q, target %q, lens %q", order, binding, result.LineageID, result.TargetIdentity, lens)
+		}
+	}
 }
 
 func writeReviewStartCandidate(t *testing.T, repo, path, contents string, mode os.FileMode) {

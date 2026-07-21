@@ -46,9 +46,11 @@ type ReviewFacadeStartResult struct {
 }
 
 // ReviewFacadeLensBinding pairs one selected lens with its frozen zero-based
-// order and canonical repository so orchestrators build capture bindings
-// exclusively from START output.
+// order. Negotiated START enriches each binding with its immutable lineage and
+// target; repository remains an optional v1 routing hint.
 type ReviewFacadeLensBinding struct {
+	Lineage    string `json:"lineage,omitempty"`
+	Target     string `json:"target,omitempty"`
 	Lens       string `json:"lens"`
 	Order      int    `json:"order"`
 	Repository string `json:"repository,omitempty"`

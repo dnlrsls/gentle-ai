@@ -49,13 +49,13 @@ func newReviewIntegrationStartResult(legacy ReviewFacadeStartResult, assessment 
 	result := ReviewIntegrationStartResult{
 		Schema: ReviewIntegrationStartSchema, Contract: ReviewIntegrationContractV1, Operation: "review.start",
 		Action: legacy.Action, LensesRequired: legacy.LensesRequired, LineageID: legacy.LineageID,
-		State: legacy.State, RiskLevel: legacy.RiskLevel, SelectedLenses: append([]string{}, legacy.SelectedLenses...), LensBindings: append([]ReviewFacadeLensBinding{}, legacy.LensBindings...),
-		Projection: legacy.Projection, ChangedFiles: legacy.ChangedFiles, ChangedLines: legacy.ChangedLines,
+		State: legacy.State, RiskLevel: legacy.RiskLevel, SelectedLenses: append([]string{}, legacy.SelectedLenses...), LensBindings: reviewIntegrationLensBindings(legacy),
+		TargetIdentity: legacy.TargetIdentity,
+		Projection:     legacy.Projection, ChangedFiles: legacy.ChangedFiles, ChangedLines: legacy.ChangedLines,
 		CorrectionBudget: legacy.CorrectionBudget, RiskReasons: append([]reviewtransaction.RiskReason{}, assessment.Reasons...),
 	}
 	if targetMode == reviewtransaction.TargetBaseWorkspaceOverlay {
 		result.TargetMode = targetMode
-		result.TargetIdentity = legacy.TargetIdentity
 		result.BaseTree = legacy.BaseTree
 		result.CandidateTree = legacy.CandidateTree
 	}
@@ -72,6 +72,16 @@ func newReviewIntegrationStartResult(legacy ReviewFacadeStartResult, assessment 
 		return ReviewIntegrationStartResult{}, fmt.Errorf("validate negotiated START response: %w", err)
 	}
 	return result, nil
+}
+
+func reviewIntegrationLensBindings(legacy ReviewFacadeStartResult) []ReviewFacadeLensBinding {
+	bindings := make([]ReviewFacadeLensBinding, len(legacy.LensBindings))
+	copy(bindings, legacy.LensBindings)
+	for index := range bindings {
+		bindings[index].Lineage = legacy.LineageID
+		bindings[index].Target = legacy.TargetIdentity
+	}
+	return bindings
 }
 
 func reviewStartAssessmentForFrozenAuthority(legacy ReviewFacadeStartResult, assessment reviewtransaction.RiskAssessment) (reviewtransaction.RiskAssessment, error) {
@@ -122,11 +132,14 @@ func (result ReviewIntegrationStartResult) Validate() error {
 	if result.TargetMode != "" && result.TargetMode != reviewtransaction.TargetBaseWorkspaceOverlay {
 		return fmt.Errorf("unsupported negotiated START target mode %q", result.TargetMode)
 	}
+	if !validReviewCapabilitySHA256(result.TargetIdentity) {
+		return errors.New("negotiated START target identity is incomplete")
+	}
 	if result.TargetMode == reviewtransaction.TargetBaseWorkspaceOverlay {
-		if !validReviewCapabilitySHA256(result.TargetIdentity) || !validReviewGitTree(result.BaseTree) || !validReviewGitTree(result.CandidateTree) {
+		if !validReviewGitTree(result.BaseTree) || !validReviewGitTree(result.CandidateTree) {
 			return errors.New("negotiated overlay START target identity is incomplete")
 		}
-	} else if result.TargetIdentity != "" || result.BaseTree != "" || result.CandidateTree != "" {
+	} else if result.BaseTree != "" || result.CandidateTree != "" {
 		return errors.New("negotiated non-overlay START cannot contain overlay identity")
 	}
 	if result.ChangedFiles < 0 || result.ChangedLines < 0 {
@@ -143,6 +156,9 @@ func (result ReviewIntegrationStartResult) Validate() error {
 		return errors.New("negotiated START risk reasons do not match the frozen tier")
 	}
 	if err := validateReviewStartLenses(result.RiskLevel, result.SelectedLenses); err != nil {
+		return err
+	}
+	if err := validateReviewStartLensBindings(result.LineageID, result.TargetIdentity, result.SelectedLenses, result.LensBindings); err != nil {
 		return err
 	}
 	hasDiff, hasManifest := result.CandidateDiff != nil, result.ChangedPathManifest != nil
@@ -166,6 +182,22 @@ func (result ReviewIntegrationStartResult) Validate() error {
 		}
 		if (len(manifest) == 0) != (len(diffBytes) == 0) {
 			return errors.New("negotiated START candidate diff does not match changed-path manifest")
+		}
+	}
+	return nil
+}
+
+func validateReviewStartLensBindings(lineage, target string, lenses []string, bindings []ReviewFacadeLensBinding) error {
+	if len(bindings) != len(lenses) {
+		return errors.New("negotiated START lens bindings do not match selected lenses")
+	}
+	for order, lens := range lenses {
+		binding := bindings[order]
+		if binding.Lineage != lineage || binding.Target != target || binding.Lens != lens || binding.Order != order {
+			return errors.New("negotiated START lens binding does not match immutable identity")
+		}
+		if binding.Repository != "" && strings.TrimSpace(binding.Repository) == "" {
+			return errors.New("negotiated START lens binding repository is invalid")
 		}
 	}
 	return nil

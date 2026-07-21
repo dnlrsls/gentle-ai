@@ -14,10 +14,11 @@
     "review-reliability"
   ],
   "lens_bindings": [
-    {"lens": "review-risk", "order": 0, "repository": "/repository"}, {"lens": "review-resilience", "order": 1, "repository": "/repository"},
-    {"lens": "review-readability", "order": 2, "repository": "/repository"}, {"lens": "review-reliability", "order": 3, "repository": "/repository"}
+    {"lineage": "review-start-fixture", "target": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "lens": "review-risk", "order": 0, "repository": "/repository"}, {"lineage": "review-start-fixture", "target": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "lens": "review-resilience", "order": 1, "repository": "/repository"},
+    {"lineage": "review-start-fixture", "target": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "lens": "review-readability", "order": 2, "repository": "/repository"}, {"lineage": "review-start-fixture", "target": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "lens": "review-reliability", "order": 3, "repository": "/repository"}
   ],
   "projection": "workspace",
+  "target_identity": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "changed_files": 1,
   "changed_lines": 1,
   "correction_budget": 1,
