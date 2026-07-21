@@ -129,17 +129,11 @@ func engramOverlayJSON(agentID model.AgentID, cmd string) []byte {
 			},
 		}
 	} else {
-		args := []string{"mcp", "--tools=agent"}
-		if agentID == model.AgentAntigravity {
-			// Antigravity should launch the default Engram MCP server without
-			// narrowing the exposed tool set.
-			args = []string{"mcp"}
-		}
 		cfg = map[string]any{
 			"mcpServers": map[string]any{
 				"engram": map[string]any{
 					"command": cmd,
-					"args":    args,
+					"args":    []string{"mcp", "--tools=agent"},
 				},
 			},
 		}
@@ -262,35 +256,112 @@ func ensureJSONFileIfMissing(path string) (filemerge.WriteResult, error) {
 	return filemerge.WriteFileAtomic(path, []byte("{}\n"), 0o644)
 }
 
-func installAntigravityEngramPlugin(homeDir, engramCommand string) (bool, []string, error) {
-	pluginDir := filepath.Join(homeDir, ".gemini", "antigravity-cli", "plugins", "gentle-ai-engram")
-	files := make([]string, 0, 3)
-	changed := false
-
-	pluginPath := filepath.Join(pluginDir, "plugin.json")
-	pluginWrite, err := filemerge.WriteFileAtomic(pluginPath, []byte(antigravityEngramPluginJSON), 0o644)
-	if err != nil {
-		return false, nil, fmt.Errorf("write Antigravity Engram plugin manifest: %w", err)
-	}
-	changed = changed || pluginWrite.Changed
-	files = append(files, pluginPath)
-
+func installAntigravityEngramPlugin(homeDir string, adapter agents.Adapter) (bool, []string, error) {
+	globalPath := adapter.MCPConfigPath(homeDir, "engram")
+	pluginDir := filepath.Join(filepath.Dir(globalPath), "plugins", "gentle-ai-engram")
 	pluginMCPPath := filepath.Join(pluginDir, "mcp_config.json")
-	mcpWrite, err := filemerge.WriteFileAtomic(pluginMCPPath, engramOverlayJSON(model.AgentAntigravity, engramCommand), 0o644)
-	if err != nil {
-		return false, nil, fmt.Errorf("write Antigravity Engram plugin MCP config: %w", err)
-	}
-	changed = changed || mcpWrite.Changed
-	files = append(files, pluginMCPPath)
+	pluginPath := filepath.Join(pluginDir, "plugin.json")
+	settingsPath := adapter.SettingsPath(homeDir)
 
-	hooksPath := filepath.Join(pluginDir, "hooks.json")
-	hooksWrite, err := filemerge.WriteFileAtomic(hooksPath, antigravityEngramHooksJSON(), 0o644)
+	globalContent, err := readFileOrEmpty(globalPath)
+	if err != nil {
+		return false, nil, err
+	}
+	pluginContent, err := readFileOrEmpty(pluginMCPPath)
+	if err != nil {
+		return false, nil, err
+	}
+
+	global, plugin := map[string]any{}, map[string]any{}
+	if globalContent != "" {
+		if err := json.Unmarshal([]byte(globalContent), &global); err != nil {
+			return false, nil, fmt.Errorf("parse Antigravity global config %q: %w", globalPath, err)
+		}
+	}
+	if pluginContent != "" {
+		if err := json.Unmarshal([]byte(pluginContent), &plugin); err != nil {
+			return false, nil, fmt.Errorf("parse Antigravity plugin config %q: %w", pluginMCPPath, err)
+		}
+	}
+
+	settingsMissing := false
+	var settingsContent []byte
+	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
+		settingsMissing = true
+		settingsContent, err = os.ReadFile(filepath.Join(homeDir, ".gemini", "settings.json"))
+		if os.IsNotExist(err) {
+			settingsContent = []byte("{}")
+		} else if err != nil {
+			return false, nil, fmt.Errorf("read gemini settings %q: %w", settingsPath, err)
+		}
+	} else if err != nil {
+		return false, nil, fmt.Errorf("stat Antigravity settings %q: %w", settingsPath, err)
+	}
+
+	globalServers, _ := global["mcpServers"].(map[string]any)
+	_, migrate := globalServers["engram"]
+	if migrate {
+		delete(globalServers, "engram")
+		global["mcpServers"] = globalServers
+	}
+	pluginServers, _ := plugin["mcpServers"].(map[string]any)
+	if pluginServers == nil {
+		pluginServers = map[string]any{}
+	}
+
+	command, ok := existingMergedEngramCommand([]byte(pluginContent), model.AgentAntigravity)
+	if !ok {
+		command, _ = existingMergedEngramCommand([]byte(globalContent), model.AgentAntigravity)
+	}
+	if command == "" {
+		command = preferredAntigravityEngramCommand()
+	}
+	command = stableEngramCommandForExisting(command, model.AgentAntigravity)
+	pluginServers["engram"] = map[string]any{"command": command, "args": []string{"mcp", "--tools=agent"}}
+	plugin["mcpServers"] = pluginServers
+	pluginMCP, _ := json.MarshalIndent(plugin, "", "  ")
+	pluginMCP = append(pluginMCP, '\n')
+
+	var globalMCP []byte
+	if migrate {
+		globalMCP, _ = json.MarshalIndent(global, "", "  ")
+		globalMCP = append(globalMCP, '\n')
+	}
+
+	changed, files := false, []string{pluginMCPPath, filepath.Join(pluginDir, "hooks.json")}
+	mcpWrite, err := filemerge.WriteFileAtomic(pluginMCPPath, pluginMCP, 0o644)
+	if err != nil {
+		return false, nil, fmt.Errorf("write Antigravity plugin MCP config: %w", err)
+	}
+	changed = mcpWrite.Changed
+	hooksWrite, err := filemerge.WriteFileAtomic(files[1], antigravityEngramHooksJSON(), 0o644)
 	if err != nil {
 		return false, nil, fmt.Errorf("write Antigravity Engram hooks: %w", err)
 	}
 	changed = changed || hooksWrite.Changed
-	files = append(files, hooksPath)
 
+	if settingsMissing {
+		settingsWrite, err := filemerge.WriteFileAtomic(settingsPath, settingsContent, 0o644)
+		if err != nil {
+			return false, nil, fmt.Errorf("write Antigravity settings %q: %w", settingsPath, err)
+		}
+		changed = changed || settingsWrite.Changed
+	}
+	files = append(files, settingsPath, pluginPath)
+
+	manifestWrite, err := filemerge.WriteFileAtomic(pluginPath, []byte(antigravityEngramPluginJSON), 0o644)
+	if err != nil {
+		return false, nil, fmt.Errorf("write Antigravity Engram plugin manifest: %w", err)
+	}
+	changed = changed || manifestWrite.Changed
+	if migrate {
+		globalWrite, err := filemerge.WriteFileAtomic(globalPath, globalMCP, 0o644)
+		if err != nil {
+			return false, nil, fmt.Errorf("remove Antigravity global Engram registration: %w", err)
+		}
+		changed = changed || globalWrite.Changed
+		files = append(files, globalPath)
+	}
 	return changed, files, nil
 }
 
@@ -349,6 +420,15 @@ func injectWithOptions(configHomeDir, promptDir string, adapter agents.Adapter, 
 		if mcpPath == "" {
 			break
 		}
+		if adapter.Agent() == model.AgentAntigravity {
+			pluginChanged, pluginFiles, pluginErr := installAntigravityEngramPlugin(configHomeDir, adapter)
+			if pluginErr != nil {
+				return InjectionResult{}, pluginErr
+			}
+			changed = changed || pluginChanged
+			files = append(files, pluginFiles...)
+			break
+		}
 		engramCommand := stableEngramCommandForMergedConfig(mcpPath, adapter.Agent())
 		var overlay []byte
 		if adapter.Agent() == model.AgentVSCodeCopilot {
@@ -363,22 +443,6 @@ func injectWithOptions(configHomeDir, promptDir string, adapter agents.Adapter, 
 		}
 		changed = changed || mcpWrite.Changed
 		files = append(files, mcpPath)
-
-		if adapter.Agent() == model.AgentAntigravity {
-			settingsWrite, settingsErr := ensureJSONFileIfMissing(adapter.SettingsPath(configHomeDir))
-			if settingsErr != nil {
-				return InjectionResult{}, fmt.Errorf("ensure Antigravity settings: %w", settingsErr)
-			}
-			changed = changed || settingsWrite.Changed
-			files = append(files, adapter.SettingsPath(configHomeDir))
-
-			pluginChanged, pluginFiles, pluginErr := installAntigravityEngramPlugin(configHomeDir, engramCommand)
-			if pluginErr != nil {
-				return InjectionResult{}, pluginErr
-			}
-			changed = changed || pluginChanged
-			files = append(files, pluginFiles...)
-		}
 
 	case model.StrategyMergeIntoYAML:
 		// Hermes: upsert the engram MCP server block under mcp_servers: in
@@ -686,6 +750,14 @@ func preferredStableEngramCommand() string {
 	return "engram"
 }
 
+func preferredAntigravityEngramCommand() string {
+	p, err := EngramLookPath("engram")
+	if err == nil && isAbsoluteEngramPath(p) {
+		return p
+	}
+	return preferredStableEngramCommand()
+}
+
 func existingMergedEngramCommand(raw []byte, agentID model.AgentID) (string, bool) {
 	if len(raw) == 0 {
 		return "", false
@@ -844,7 +916,7 @@ func isEngramCommand(cmd string) bool {
 // isAbsoluteEngramPath reports whether path is an absolute filesystem path
 // that points to an engram binary.
 func isAbsoluteEngramPath(path string) bool {
-	return filepath.IsAbs(path) && isEngramCommand(path)
+	return (filepath.IsAbs(path) || strings.HasPrefix(filepath.ToSlash(path), "/")) && isEngramCommand(path)
 }
 
 func isVersionedHomebrewCellarPath(path string) bool {
@@ -854,7 +926,7 @@ func isVersionedHomebrewCellarPath(path string) bool {
 
 func isStableHomebrewEngramPath(path string) bool {
 	clean := filepath.ToSlash(filepath.Clean(path))
-	return (clean == "/opt/homebrew/bin/engram" || clean == "/usr/local/bin/engram") && isEngramCommand(clean)
+	return (clean == "/opt/homebrew/bin/engram" || clean == "/usr/local/bin/engram" || clean == "/home/linuxbrew/.linuxbrew/bin/engram") && isEngramCommand(clean)
 }
 
 // resolveProfileAssignments builds the []codex.ProfileAssignment slice used
