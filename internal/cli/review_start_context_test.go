@@ -190,6 +190,7 @@ func TestNegotiatedReviewStartContextValidationDistinguishesMissingAndEmpty(t *t
 	valid.LensesRequired = false
 	valid.RiskLevel = reviewtransaction.RiskLow
 	valid.SelectedLenses = []string{}
+	valid.LensBindings = []ReviewFacadeLensBinding{}
 	valid.ChangedFiles = 0
 	valid.ChangedLines = 0
 	valid.CorrectionBudget = 0
