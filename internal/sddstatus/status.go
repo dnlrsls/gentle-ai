@@ -158,6 +158,7 @@ type Status struct {
 	ActionContext     ActionContext                  `json:"actionContext"`
 	Relationships     Relationships                  `json:"relationships"`
 	RemediationState  RemediationState               `json:"remediationState"`
+	RuntimeAttempts   RuntimeAttemptState            `json:"runtimeAttempts"`
 	ReviewGate        *ReviewGateState               `json:"reviewGate,omitempty"`
 	ReviewTransaction *reviewtransaction.Transaction `json:"reviewTransaction,omitempty"`
 	PhaseInstructions *PhaseInstructions             `json:"phaseInstructions,omitempty"`
@@ -337,6 +338,7 @@ func Resolve(options ResolveOptions) (Status, error) {
 		reviewStateReason,
 		readText(firstPath(artifactPaths.ApplyProgress)),
 	)
+	runtimeAttempts := parseRuntimeAttempts(readText(firstPath(artifactPaths.ApplyProgress)), changeName)
 	dependencies := resolveDependencies(artifacts, taskProgress, applyState, coreReady, verifyResult.Passing, remediationState.Complete)
 	nextRecommended := resolveNextRecommended(dependencies, applyState, artifacts["verifyReport"] == ArtifactDone, remediationState)
 	if staleAllowAuthority != nil {
@@ -385,6 +387,7 @@ func Resolve(options ResolveOptions) (Status, error) {
 	if !bindingPresent && !bridge.Eligible && !bridge.Relevant {
 		applyPreVerifyReviewRouting(&dependencies, &nextRecommended, &blockedReasons, applyState, artifacts["verifyReport"] == ArtifactDone, reviewState, reviewStateReason)
 	}
+	applyRuntimeAttemptRouting(&dependencies, &nextRecommended, &blockedReasons, runtimeAttempts)
 
 	status := baseStatus(workspaceRoot, &changeName, &changeRoot, nextRecommended, blockedReasons)
 	status.ArtifactPaths = artifactPaths
@@ -394,6 +397,7 @@ func Resolve(options ResolveOptions) (Status, error) {
 	status.Dependencies = dependencies
 	status.ApplyState = applyState
 	status.RemediationState = remediationState
+	status.RuntimeAttempts = runtimeAttempts
 	status.ReviewTransaction = reviewState
 	if !bindingPresent {
 		if staleAllowAuthority != nil {
@@ -542,6 +546,7 @@ func resolveEngramStatus(workspaceRoot string, requestedChange string, includeIn
 		reviewStateReason,
 		artifactsByType["apply-progress"].Content,
 	)
+	runtimeAttempts := parseRuntimeAttempts(artifactsByType["apply-progress"].Content, changeName)
 	if remediationState.Reason != "" {
 		blockedReasons = append(blockedReasons, remediationState.Reason)
 	}
@@ -560,6 +565,7 @@ func resolveEngramStatus(workspaceRoot string, requestedChange string, includeIn
 	if !bridge.Eligible && !bridge.Relevant {
 		applyPreVerifyReviewRouting(&dependencies, &nextRecommended, &blockedReasons, applyState, artifacts["verifyReport"] == ArtifactDone, reviewState, reviewStateReason)
 	}
+	applyRuntimeAttemptRouting(&dependencies, &nextRecommended, &blockedReasons, runtimeAttempts)
 
 	changeRoot := fmt.Sprintf("engram:sdd/%s", changeName)
 	status := baseStatus(workspaceRoot, &changeName, &changeRoot, nextRecommended, blockedReasons)
@@ -572,6 +578,7 @@ func resolveEngramStatus(workspaceRoot string, requestedChange string, includeIn
 	status.Dependencies = dependencies
 	status.ApplyState = applyState
 	status.RemediationState = remediationState
+	status.RuntimeAttempts = runtimeAttempts
 	status.ReviewTransaction = reviewState
 	if staleAllowAuthority != nil {
 		status.ReviewGate = &ReviewGateState{Result: staleAllowAuthority.Result, Reason: staleAllowAuthority.Reason}
@@ -588,6 +595,17 @@ func resolveEngramStatus(workspaceRoot string, requestedChange string, includeIn
 		status.PhaseInstructions = &instructions
 	}
 	return status, true, nil
+}
+
+func applyRuntimeAttemptRouting(dependencies *Dependencies, next *string, blockedReasons *[]string, attempts RuntimeAttemptState) {
+	if !attempts.DecisionRequired {
+		return
+	}
+	dependencies.Apply = DependencyBlocked
+	dependencies.Verify = DependencyBlocked
+	dependencies.Archive = DependencyBlocked
+	*next = "decision-required"
+	*blockedReasons = append(*blockedReasons, attempts.Reason)
 }
 
 func compactBridgeableReviewArtifact(state ArtifactState, reason string) bool {
