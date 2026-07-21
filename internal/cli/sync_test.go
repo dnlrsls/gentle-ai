@@ -3413,6 +3413,82 @@ func TestSyncPersonaPathsDeclareManagedClaudeOutputStyle(t *testing.T) {
 	}
 }
 
+func TestComponentSyncStepPiPersonaWritesGlobalConfig(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	step := componentSyncStep{
+		id:           "sync:component:persona",
+		component:    model.ComponentPersona,
+		homeDir:      home,
+		workspaceDir: workspace,
+		agents:       []model.AgentID{model.AgentPi},
+		selection:    model.Selection{Persona: model.PersonaGentlemanNeutralArtifacts},
+	}
+	if err := step.Run(); err != nil {
+		t.Fatalf("componentSyncStep.Run() error = %v", err)
+	}
+
+	globalPath := filepath.Join(home, ".pi", "gentle-ai", "persona.json")
+	if _, err := os.Stat(globalPath); err != nil {
+		t.Fatalf("Pi sync config missing at %q: %v", globalPath, err)
+	}
+	workspacePath := filepath.Join(workspace, ".pi", "gentle-ai", "persona.json")
+	if _, err := os.Stat(workspacePath); !os.IsNotExist(err) {
+		t.Fatalf("Pi sync created workspace override %q: %v", workspacePath, err)
+	}
+	paths := syncPersonaPathsWithWorkspace(home, workspace, step.selection, resolveAdapters(step.agents))
+	if !containsPath(paths, globalPath) {
+		t.Fatalf("sync persona paths missing Pi config %q: %v", globalPath, paths)
+	}
+}
+
+func TestRunSyncWithSelectionRejectsInvalidPersistedPiPersona(t *testing.T) {
+	home := t.TempDir()
+	personaPath := filepath.Join(home, ".pi", "gentle-ai", "persona.json")
+	if err := os.MkdirAll(filepath.Dir(personaPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	existing := []byte(`{"mode":"gentleman","userSetting":true}`)
+	if err := os.WriteFile(personaPath, existing, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := state.Write(home, state.InstallState{Persona: "unsupported"}); err != nil {
+		t.Fatalf("state.Write() error = %v", err)
+	}
+
+	_, err := RunSyncWithSelection(home, model.Selection{
+		Agents:     []model.AgentID{model.AgentPi},
+		Components: []model.ComponentID{model.ComponentPersona},
+	})
+	if err == nil {
+		t.Fatal("RunSyncWithSelection() error = nil, want invalid persisted persona error")
+	}
+	content, readErr := os.ReadFile(personaPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile() error = %v", readErr)
+	}
+	if !bytes.Equal(content, existing) {
+		t.Fatalf("Pi persona config changed after invalid persisted persona: got %q, want %q", content, existing)
+	}
+}
+
+func TestRestorePersistedSelectionPreservesExplicitPiComponents(t *testing.T) {
+	selection := BuildSyncSelection(SyncFlags{}, []model.AgentID{model.AgentPi})
+	persisted := state.InstallState{
+		InstalledAgents:     []string{string(model.AgentPi)},
+		SelectionConfigured: true,
+		Components:          []model.ComponentID{model.ComponentEngram},
+		Persona:             string(model.PersonaNeutral),
+	}
+
+	RestorePersistedSelection(&selection, persisted, SyncFlags{})
+
+	want := []model.ComponentID{model.ComponentEngram}
+	if !reflect.DeepEqual(selection.Components, want) {
+		t.Fatalf("persisted explicit Pi components = %#v, want %#v", selection.Components, want)
+	}
+}
+
 // TestRunSyncRegeneratesPersonaBlockBetweenMarkers verifies the core fix:
 // when an old persona block lives between markers, sync replaces it with the
 // embedded asset for the current version.

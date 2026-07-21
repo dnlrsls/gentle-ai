@@ -16,6 +16,7 @@ import (
 	"github.com/gentleman-programming/gentle-ai/internal/agents/kimi"
 	"github.com/gentleman-programming/gentle-ai/internal/agents/openclaw"
 	"github.com/gentleman-programming/gentle-ai/internal/agents/opencode"
+	"github.com/gentleman-programming/gentle-ai/internal/agents/pi"
 	"github.com/gentleman-programming/gentle-ai/internal/assets"
 	"github.com/gentleman-programming/gentle-ai/internal/model"
 )
@@ -27,6 +28,7 @@ func kimiAdapter() agents.Adapter        { return kimi.NewAdapter() }
 func kilocodeAdapter() agents.Adapter    { return kilocode.NewAdapter() }
 func openclawAdapter() agents.Adapter    { return openclaw.NewAdapter() }
 func opencodeAdapter() agents.Adapter    { return opencode.NewAdapter() }
+func piAdapter() agents.Adapter          { return pi.NewAdapter() }
 
 var claudeOutputStyleLanguageGuardrails = []string{
 	"Determine the reply language from the latest actual user request",
@@ -2925,6 +2927,126 @@ func TestHermesPersonaAssetsContainIdentitySection(t *testing.T) {
 			}
 			if !strings.Contains(content, "Hermes") {
 				t.Fatalf("%s ## Identity section must mention \"Hermes\"", path)
+			}
+		})
+	}
+}
+func TestPiPersonaConfigFollowsSelectedPersona(t *testing.T) {
+	tests := []struct {
+		name        string
+		forSync     bool
+		persona     model.PersonaID
+		existing    string
+		wantMode    string
+		wantChanged bool
+		wantErr     bool
+	}{
+		{
+			name:        "install maps gentleman",
+			persona:     model.PersonaGentleman,
+			wantMode:    "gentleman",
+			wantChanged: true,
+		},
+		{
+			name:        "sync maps neutral",
+			forSync:     true,
+			persona:     model.PersonaNeutral,
+			wantMode:    "neutral",
+			wantChanged: true,
+		},
+		{
+			name:        "legacy artifact persona maps to gentleman and preserves sibling fields",
+			persona:     model.PersonaGentlemanNeutralArtifacts,
+			existing:    `{"userSetting":true,"mode":"neutral"}`,
+			wantMode:    "gentleman",
+			wantChanged: true,
+		},
+		{
+			name:        "matching mode does not rewrite configuration",
+			persona:     model.PersonaGentleman,
+			existing:    `{"mode":"gentleman","userSetting":true}`,
+			wantMode:    "gentleman",
+			wantChanged: false,
+		},
+		{
+			name:        "custom preserves existing Pi configuration",
+			persona:     model.PersonaCustom,
+			existing:    `{"mode":"neutral","userSetting":true}`,
+			wantChanged: false,
+		},
+		{
+			name:     "unsupported persona leaves existing configuration untouched",
+			persona:  model.PersonaID("unsupported"),
+			existing: `{"mode":"gentleman","userSetting":true}`,
+			wantErr:  true,
+		},
+		{
+			name:     "malformed configuration is not overwritten",
+			persona:  model.PersonaNeutral,
+			existing: `{"mode":`,
+			wantErr:  true,
+		},
+		{
+			name:     "non-object configuration is not overwritten",
+			persona:  model.PersonaNeutral,
+			existing: `["mode"]`,
+			wantErr:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			path := filepath.Join(home, ".pi", "gentle-ai", "persona.json")
+			if tt.existing != "" {
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("MkdirAll() error = %v", err)
+				}
+				if err := os.WriteFile(path, []byte(tt.existing), 0o644); err != nil {
+					t.Fatalf("WriteFile() error = %v", err)
+				}
+			}
+			inject := Inject
+			if tt.forSync {
+				inject = InjectForSync
+			}
+			result, err := inject(home, piAdapter(), tt.persona)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Pi persona injection error = nil, want error")
+				}
+				content, readErr := os.ReadFile(path)
+				if readErr != nil {
+					t.Fatalf("ReadFile() error = %v", readErr)
+				}
+				if string(content) != tt.existing {
+					t.Fatalf("Pi persona config changed after error: got %q, want %q", content, tt.existing)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Pi persona injection error = %v", err)
+			}
+			if result.Changed != tt.wantChanged {
+				t.Fatalf("Pi persona injection changed = %v, want %v", result.Changed, tt.wantChanged)
+			}
+			if tt.wantMode != "" {
+				content, readErr := os.ReadFile(path)
+				if readErr != nil {
+					t.Fatalf("ReadFile() error = %v", readErr)
+				}
+				var config map[string]any
+				if err := json.Unmarshal(content, &config); err != nil {
+					t.Fatalf("Unmarshal() error = %v", err)
+				}
+				if config["mode"] != tt.wantMode {
+					t.Fatalf("mode = %q, want %q", config["mode"], tt.wantMode)
+				}
+				if tt.existing != "" && config["userSetting"] != true {
+					t.Fatal("Pi persona config did not preserve userSetting")
+				}
+			}
+			if _, statErr := os.Stat(filepath.Join(home, ".pi", "agent", "APPEND_SYSTEM.md")); !os.IsNotExist(statErr) {
+				t.Fatalf("Pi persona injection wrote legacy APPEND_SYSTEM.md: %v", statErr)
 			}
 		})
 	}

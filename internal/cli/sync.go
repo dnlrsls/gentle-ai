@@ -16,6 +16,7 @@ import (
 
 	"github.com/gentleman-programming/gentle-ai/internal/agents"
 	opencodeagent "github.com/gentleman-programming/gentle-ai/internal/agents/opencode"
+	piagent "github.com/gentleman-programming/gentle-ai/internal/agents/pi"
 	"github.com/gentleman-programming/gentle-ai/internal/backup"
 	"github.com/gentleman-programming/gentle-ai/internal/components/communitytool"
 	"github.com/gentleman-programming/gentle-ai/internal/components/engram"
@@ -595,6 +596,10 @@ func syncPersonaPathsWithWorkspace(homeDir, workspaceDir string, selection model
 	paths := []string{}
 	for _, adapter := range adapters {
 		targetDir := componentInjectionDir(homeDir, workspaceDir, adapter)
+		if adapter.Agent() == model.AgentPi {
+			paths = append(paths, piagent.PersonaConfigPath(targetDir))
+			continue
+		}
 		if adapter.Agent() == model.AgentOpenClaw {
 			paths = append(paths, filepath.Join(targetDir, "SOUL.md"))
 			continue
@@ -1228,18 +1233,24 @@ func boolToInt(b bool) int {
 //
 // Resolution order:
 //  1. Explicit: if selection.Persona is non-empty, it is left untouched.
-//  2. Persisted: the persisted string is normalized via normalizePersona;
-//     on error (unknown/misspelled value) the fallback is used instead.
+//  2. Persisted: the persisted string is normalized via normalizePersona.
+//     Invalid values fail when Pi persona configuration would be written;
+//     other agents retain the legacy neutral fallback.
 //  3. Fallback: PersonaNeutral for default-safe behavior when persisted state is
 //     missing, empty, unreadable, or invalid.
-func applyResolvedPersona(selection *model.Selection, persisted string) {
+func applyResolvedPersona(selection *model.Selection, persisted string) error {
 	if selection.Persona != "" {
-		return
+		if _, err := normalizePersona(string(selection.Persona)); err != nil && selectionWritesPiPersona(*selection) {
+			return err
+		}
+		return nil
 	}
 	if persisted != "" {
 		if id, err := normalizePersona(persisted); err == nil {
 			selection.Persona = id
-			return
+			return nil
+		} else if selectionWritesPiPersona(*selection) {
+			return fmt.Errorf("invalid persisted persona %q: %w", persisted, err)
 		}
 		// Unknown/misspelled persisted value — fall through to neutral.
 	}
@@ -1247,6 +1258,11 @@ func applyResolvedPersona(selection *model.Selection, persisted string) {
 	// no Persona field, and unreadable/invalid state must not implicitly restore
 	// regional persona behavior.
 	selection.Persona = model.PersonaNeutral
+	return nil
+}
+
+func selectionWritesPiPersona(selection model.Selection) bool {
+	return containsAgent(selection.Agents, model.AgentPi) && hasComponent(selection.Components, model.ComponentPersona)
 }
 
 // RunSyncWithSelection is the programmatic entry point for sync.
@@ -1266,7 +1282,9 @@ func RunSyncWithSelection(homeDir string, selection model.Selection) (SyncResult
 	if selection.Persona == "" {
 		var persistedPersona string
 		persistedPersona = persistedState.Persona
-		applyResolvedPersona(&selection, persistedPersona)
+		if err := applyResolvedPersona(&selection, persistedPersona); err != nil {
+			return SyncResult{Agents: agentIDs, Selection: selection}, err
+		}
 	}
 
 	result := SyncResult{
@@ -1437,7 +1455,9 @@ func RunSync(args []string) (SyncResult, error) {
 	// branch (which returns early) and the normal path (which delegates to
 	// RunSyncWithSelection — that function's early-return guard prevents a second
 	// disk read on the CLI path).
-	applyResolvedPersona(&selection, persistedState.Persona)
+	if err := applyResolvedPersona(&selection, persistedState.Persona); err != nil {
+		return SyncResult{}, err
+	}
 
 	if flags.DryRun {
 		// Build the plan for inspection, skip execution.

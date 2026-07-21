@@ -16,6 +16,7 @@ import (
 	"github.com/gentleman-programming/gentle-ai/internal/agents"
 	codexagent "github.com/gentleman-programming/gentle-ai/internal/agents/codex"
 	"github.com/gentleman-programming/gentle-ai/internal/agents/kimi"
+	piagent "github.com/gentleman-programming/gentle-ai/internal/agents/pi"
 	"github.com/gentleman-programming/gentle-ai/internal/assets"
 	"github.com/gentleman-programming/gentle-ai/internal/backup"
 	"github.com/gentleman-programming/gentle-ai/internal/components/communitytool"
@@ -1536,6 +1537,10 @@ func componentPathsWithWorkspaceScoped(homeDir, workspaceDir string, scope Insta
 			}
 		case model.ComponentPersona:
 			if selection.Persona == model.PersonaCustom {
+				break
+			}
+			if adapter.Agent() == model.AgentPi {
+				paths = append(paths, piagent.PersonaConfigPath(targetDir))
 				break
 			}
 			if adapter.Agent() == model.AgentOpenClaw {

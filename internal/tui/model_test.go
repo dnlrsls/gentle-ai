@@ -389,7 +389,7 @@ func TestAgentSelectionToggleAndContinue(t *testing.T) {
 	}
 }
 
-func TestPiOnlyAgentContinueSkipsPromptsAndIncludesEngram(t *testing.T) {
+func TestPiOnlyAgentContinueSkipsPromptsAndIncludesPersona(t *testing.T) {
 	m := NewModel(system.DetectionResult{}, "dev")
 	m.Screen = ScreenAgents
 	m.Selection.Agents = []model.AgentID{model.AgentPi}
@@ -402,19 +402,20 @@ func TestPiOnlyAgentContinueSkipsPromptsAndIncludesEngram(t *testing.T) {
 	if state.Screen != ScreenDependencyTree {
 		t.Fatalf("screen = %v, want %v", state.Screen, ScreenDependencyTree)
 	}
-	wantComponents := []model.ComponentID{model.ComponentEngram}
+	wantComponents := []model.ComponentID{model.ComponentEngram, model.ComponentPersona}
 	if !reflect.DeepEqual(state.Selection.Components, wantComponents) {
 		t.Fatalf("components = %v, want %v", state.Selection.Components, wantComponents)
 	}
 	if !reflect.DeepEqual(state.DependencyPlan.Agents, []model.AgentID{model.AgentPi}) {
 		t.Fatalf("dependency agents = %v, want [pi]", state.DependencyPlan.Agents)
 	}
-	if !reflect.DeepEqual(state.DependencyPlan.OrderedComponents, wantComponents) {
-		t.Fatalf("dependency components = %v, want %v", state.DependencyPlan.OrderedComponents, wantComponents)
+	wantPlanComponents := []model.ComponentID{model.ComponentPersona, model.ComponentEngram}
+	if !reflect.DeepEqual(state.DependencyPlan.OrderedComponents, wantPlanComponents) {
+		t.Fatalf("dependency components = %v, want %v", state.DependencyPlan.OrderedComponents, wantPlanComponents)
 	}
 }
 
-func TestNewModelPiOnlyDetectionDefaultsToEngramOnly(t *testing.T) {
+func TestNewModelPiOnlyConfiguredSelectionPreservesComponents(t *testing.T) {
 	detection := system.DetectionResult{Configs: []system.ConfigState{{
 		Agent:       string(model.AgentPi),
 		Path:        "/tmp/fake/pi",
@@ -422,7 +423,7 @@ func TestNewModelPiOnlyDetectionDefaultsToEngramOnly(t *testing.T) {
 		IsDirectory: true,
 	}}}
 
-	m := NewModel(detection, "dev")
+	m := NewModel(detection, "dev", state.InstallState{InstalledAgents: []string{string(model.AgentPi)}, SelectionConfigured: true, Components: []model.ComponentID{model.ComponentEngram}})
 
 	wantAgents := []model.AgentID{model.AgentPi}
 	if !reflect.DeepEqual(m.Selection.Agents, wantAgents) {
@@ -431,6 +432,25 @@ func TestNewModelPiOnlyDetectionDefaultsToEngramOnly(t *testing.T) {
 	wantComponents := []model.ComponentID{model.ComponentEngram}
 	if !reflect.DeepEqual(m.Selection.Components, wantComponents) {
 		t.Fatalf("components = %v, want %v", m.Selection.Components, wantComponents)
+	}
+	m.Screen, m.Cursor = ScreenAgents, len(screensAgentOptions())
+	if updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); !reflect.DeepEqual(updated.(Model).Selection.Components, wantComponents) {
+		t.Fatalf("continued components = %v, want %v", updated.(Model).Selection.Components, wantComponents)
+	}
+}
+
+func TestNewModelPiOnlyConfiguredSelectionPreservesPersona(t *testing.T) {
+	for _, persona := range []model.PersonaID{model.PersonaNeutral, model.PersonaCustom} {
+		t.Run(string(persona), func(t *testing.T) {
+			m := NewModel(system.DetectionResult{}, "dev", state.InstallState{InstalledAgents: []string{string(model.AgentPi)}, SelectionConfigured: true, Components: []model.ComponentID{model.ComponentEngram}, Persona: string(persona)})
+			m.Screen, m.Cursor = ScreenAgents, len(screensAgentOptions())
+			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			for _, got := range []model.PersonaID{m.Selection.Persona, updated.(Model).Selection.Persona} {
+				if got != persona {
+					t.Fatalf("persona = %q, want %q", got, persona)
+				}
+			}
+		})
 	}
 }
 

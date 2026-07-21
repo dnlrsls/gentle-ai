@@ -422,6 +422,7 @@ type Model struct {
 	SpinnerFrame   int
 
 	Selection         model.Selection
+	configured        bool
 	Detection         system.DetectionResult
 	DependencyPlan    planner.ResolvedPlan
 	Review            planner.ReviewPayload
@@ -649,7 +650,7 @@ func NewModel(detection system.DetectionResult, version string, installState ...
 	}
 	agents := preselectedAgents(detection, s)
 	components := componentsForPreset(model.PresetFullGentleman, model.PersonaGentleman)
-	if isPiOnlyAgents(agents) {
+	if isPiOnlyAgents(agents) && !s.SelectionConfigured {
 		components = piOnlyComponents()
 	}
 
@@ -663,11 +664,19 @@ func NewModel(detection system.DetectionResult, version string, installState ...
 		KiroModelAssignments:   installStateKiroAssignments(s.KiroModelAssignments),
 		ModelAssignments:       installStateModelAssignments(s.ModelAssignments),
 	}
+	s.RestoreSelection(&selection)
+	if isPiOnlyAgents(agents) && s.SelectionConfigured {
+		switch persona := model.PersonaID(s.Persona); persona {
+		case model.PersonaGentleman, model.PersonaGentlemanNeutralArtifacts, model.PersonaNeutral, model.PersonaCustom:
+			selection.Persona = persona
+		}
+	}
 
 	return Model{
 		Screen:               ScreenWelcome,
 		Version:              version,
 		Selection:            selection,
+		configured:           s.SelectionConfigured,
 		Detection:            detection,
 		UninstallAgents:      agents,
 		UninstallComponents:  defaultUninstallComponents(),
@@ -2037,7 +2046,9 @@ func (m Model) confirmSelection() (tea.Model, tea.Cmd) {
 			m.toggleCurrentAgent()
 		case m.Cursor == agentCount && len(m.Selection.Agents) > 0:
 			if isPiOnlyAgents(m.Selection.Agents) {
-				m.Selection.Components = piOnlyComponents()
+				if !m.configured {
+					m.Selection.Components = piOnlyComponents()
+				}
 				m.buildDependencyPlan()
 				m.setScreen(ScreenDependencyTree)
 				return m, nil
@@ -4221,7 +4232,7 @@ func isPiOnlyAgents(agents []model.AgentID) bool {
 }
 
 func piOnlyComponents() []model.ComponentID {
-	return []model.ComponentID{model.ComponentEngram}
+	return []model.ComponentID{model.ComponentEngram, model.ComponentPersona}
 }
 
 func defaultUninstallComponents() []model.ComponentID {

@@ -24,6 +24,8 @@ const (
 	piMCPAdapterVersionRange    = "^2.6.0"
 	piAppendSystemFile          = "APPEND_SYSTEM.md"
 	piEngramMCPConfigFile       = "mcp.json"
+	piGentlePersonaDirectory    = "gentle-ai"
+	piGentlePersonaFile         = "persona.json"
 	piSettingsFile              = "settings.json"
 	piNPMDirectory              = "npm"
 	piNPMPackageFile            = "package.json"
@@ -301,6 +303,72 @@ func (a *Adapter) SupportsMCP() bool { return true }
 
 // ConfigPath returns Pi's global config directory path.
 func ConfigPath(homeDir string) string { return filepath.Join(homeDir, ".pi") }
+
+// PersonaConfigPath returns gentle-pi's runtime persona configuration path.
+func PersonaConfigPath(homeDir string) string {
+	return filepath.Join(ConfigPath(homeDir), piGentlePersonaDirectory, piGentlePersonaFile)
+}
+
+// ConfigurePersona writes the selected Gentle AI persona in gentle-pi's runtime
+// format. Custom personas are user-owned and are therefore left untouched.
+func (a *Adapter) ConfigurePersona(homeDir string, persona model.PersonaID) (bool, []string, error) {
+	mode, managed, err := piPersonaMode(persona)
+	if err != nil || !managed {
+		return false, nil, err
+	}
+
+	path := PersonaConfigPath(homeDir)
+	config, err := readPiPersonaJSONObject(path)
+	if err != nil {
+		return false, nil, err
+	}
+	if config["mode"] == mode {
+		return false, []string{path}, nil
+	}
+	config["mode"] = mode
+
+	encoded, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return false, nil, fmt.Errorf("marshal Pi persona config %q: %w", path, err)
+	}
+	write, err := filemerge.WriteFileAtomic(path, append(encoded, '\n'), 0o644)
+	if err != nil {
+		return false, nil, err
+	}
+	return write.Changed, []string{path}, nil
+}
+
+func piPersonaMode(persona model.PersonaID) (string, bool, error) {
+	switch persona {
+	case model.PersonaGentleman, model.PersonaGentlemanNeutralArtifacts:
+		return "gentleman", true, nil
+	case model.PersonaNeutral:
+		return "neutral", true, nil
+	case model.PersonaCustom:
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("unsupported Pi persona %q", persona)
+	}
+}
+
+func readPiPersonaJSONObject(path string) (map[string]any, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]any{}, nil
+		}
+		return nil, fmt.Errorf("read Pi persona config %q: %w", path, err)
+	}
+
+	var config map[string]any
+	if err := json.Unmarshal(content, &config); err != nil {
+		return nil, fmt.Errorf("unmarshal Pi persona config %q: %w", path, err)
+	}
+	if config == nil {
+		return nil, fmt.Errorf("unmarshal Pi persona config %q: must be a JSON object", path)
+	}
+	return config, nil
+}
 
 // AgentConfigPath returns Pi's current agent-owned config directory path.
 func AgentConfigPath(homeDir string) string { return filepath.Join(ConfigPath(homeDir), "agent") }

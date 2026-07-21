@@ -25,6 +25,10 @@ type bootstrapper interface {
 	BootstrapTemplate(homeDir string) error
 }
 
+type piPersonaConfigurer interface {
+	ConfigurePersona(homeDir string, persona model.PersonaID) (bool, []string, error)
+}
+
 // outputStyleOverlayJSON is the settings.json overlay to enable the selected
 // managed Claude Code output style.
 func outputStyleOverlayJSON(name string) []byte {
@@ -63,6 +67,17 @@ func InjectForSync(homeDir string, adapter agents.Adapter, persona model.Persona
 func injectInternal(homeDir string, adapter agents.Adapter, persona model.PersonaID, syncManaged bool) (InjectionResult, error) {
 	if !adapter.SupportsSystemPrompt() {
 		return InjectionResult{}, nil
+	}
+	if adapter.Agent() == model.AgentPi {
+		configurer, ok := adapter.(piPersonaConfigurer)
+		if !ok {
+			return InjectionResult{}, fmt.Errorf("Pi adapter does not support persona configuration")
+		}
+		changed, files, err := configurer.ConfigurePersona(homeDir, persona)
+		if err != nil {
+			return InjectionResult{}, err
+		}
+		return InjectionResult{Changed: changed, Files: files}, nil
 	}
 	if err := validateOpenClawWorkspacePath(homeDir, adapter); err != nil {
 		return InjectionResult{}, err

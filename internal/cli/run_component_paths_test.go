@@ -29,6 +29,29 @@ func TestComponentPathsSDDIncludesSystemPromptForAllSupportedAgents(t *testing.T
 	}
 }
 
+func TestComponentPersonaPiUsesRequestedScope(t *testing.T) {
+	for _, scope := range []InstallScope{ScopeGlobal, ScopeWorkspace} {
+		t.Run(string(scope), func(t *testing.T) {
+			home, workspace := t.TempDir(), t.TempDir()
+			targetRoot := map[InstallScope]string{ScopeGlobal: home, ScopeWorkspace: workspace}[scope]
+			step := componentApplyStep{id: "component:persona", component: model.ComponentPersona, homeDir: home, workspaceDir: workspace, scope: scope, agents: []model.AgentID{model.AgentPi}, selection: model.Selection{Persona: model.PersonaNeutral}}
+			if err := step.Run(); err != nil {
+				t.Fatalf("componentApplyStep.Run() error = %v", err)
+			}
+			personaPath := filepath.Join(targetRoot, ".pi", "gentle-ai", "persona.json")
+			if _, err := os.Stat(personaPath); err != nil {
+				t.Fatalf("Pi persona config missing at %q: %v", personaPath, err)
+			}
+			if paths := componentPathsWithWorkspaceScoped(home, workspace, scope, step.selection, resolveAdapters(step.agents), model.ComponentPersona); !containsPath(paths, personaPath) {
+				t.Fatalf("component persona paths missing Pi config %q: %v", personaPath, paths)
+			}
+			if _, err := os.Stat(filepath.Join(targetRoot, ".pi", "agent", "APPEND_SYSTEM.md")); !os.IsNotExist(err) {
+				t.Fatalf("Pi persona install wrote legacy prompt: %v", err)
+			}
+		})
+	}
+}
+
 func TestComponentPathsSDDIncludesOpenCodeSettingsAndCommands(t *testing.T) {
 	home := t.TempDir()
 	adapters := resolveAdapters([]model.AgentID{model.AgentOpenCode})
