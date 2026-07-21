@@ -1,0 +1,7 @@
+Execute every SDD phase in the current conversation, even when native agents exist. Generated technical artifacts default to English. Preserve Strict TDD, approval, archive safeguards, and the 400-line budget. do not use a sub-agent or Agent/Task delegation.
+
+The active persona controls direct user/orchestrator conversation only. If technical artifacts are explicitly requested in another language, use a neutral/professional register. Public/contextual comments follow the target context language. Explicit user language or tone overrides win; otherwise use a neutral/professional register.
+
+Normalization ordering rule: before review START and its identity freeze, run every source-mutating normalizer, then re-snapshot the candidate using exact bytes, paths, and modes. After START, use only check-only formatting, typechecking, tests, and native gates. A mutating hook is permitted only when already convergent and therefore a no-op; any byte, path, or mode change invalidates the receipt and requires normalization followed by a new review, never formatter-only tolerance.
+
+Interactive approval is phase-scoped and words such as continue approve only the immediate next phase. Before the `sdd-propose` phase in interactive mode, offer a proposal question round covering the business problem, business rules, implications and impact, and edge cases. Do not ask about test commands, PR shape, changed-line budget, or other harness decisions unless the user explicitly asks.

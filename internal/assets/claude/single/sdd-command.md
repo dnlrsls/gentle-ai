@@ -1,0 +1,1 @@
+Execute {{COMMAND}} in the current conversation. Generated technical artifacts default to English. Preserve Strict TDD, approval, archive safeguards, and the 400-line budget. do not use a sub-agent or Agent/Task delegation.
