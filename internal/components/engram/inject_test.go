@@ -773,6 +773,69 @@ func TestInjectAntigravityRecoversWriteFailures(t *testing.T) {
 	}
 }
 
+func TestInjectAntigravityAcceptsBlankGlobalConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{name: "zero-byte"},
+		{name: "whitespace-only", content: " \t\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			global := filepath.Join(home, ".gemini", "antigravity-cli", "mcp_config.json")
+			writeFile(t, global, tt.content)
+
+			first, err := Inject(home, antigravityAdapter())
+			if err != nil {
+				t.Fatalf("Inject() first error = %v", err)
+			}
+			if !first.Changed {
+				t.Fatal("Inject() first changed = false")
+			}
+
+			plugin := filepath.Join(filepath.Dir(global), "plugins", "gentle-ai-engram")
+			if _, err := os.Stat(filepath.Join(plugin, "plugin.json")); err != nil {
+				t.Fatalf("Stat(plugin.json) error = %v", err)
+			}
+			pluginConfig := readJSONFile(t, filepath.Join(plugin, "mcp_config.json"))
+			assertNestedStrings(t, pluginConfig, []string{"mcp", "--tools=agent"}, "mcpServers", "engram", "args")
+
+			second, err := Inject(home, antigravityAdapter())
+			if err != nil {
+				t.Fatalf("Inject() second error = %v", err)
+			}
+			if second.Changed {
+				t.Fatal("Inject() second changed = true")
+			}
+		})
+	}
+}
+
+func TestInjectAntigravityRejectsNonObjectGlobalWithoutMutation(t *testing.T) {
+	home := t.TempDir()
+	global := filepath.Join(home, ".gemini", "antigravity-cli", "mcp_config.json")
+	original := []byte("null")
+	writeFile(t, global, string(original))
+
+	if _, err := Inject(home, antigravityAdapter()); err == nil || !strings.Contains(err.Error(), "expected object") {
+		t.Fatalf("Inject() error = %v, want expected object", err)
+	}
+
+	got, err := os.ReadFile(global)
+	if err != nil {
+		t.Fatalf("ReadFile(global) error = %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("global config mutated: got %q, want %q", got, original)
+	}
+	plugin := filepath.Join(filepath.Dir(global), "plugins", "gentle-ai-engram", "plugin.json")
+	if _, err := os.Stat(plugin); !os.IsNotExist(err) {
+		t.Fatalf("plugin manifest mutated: stat err = %v", err)
+	}
+}
+
 func TestInjectAntigravityRejectsBadGlobalWithoutMutation(t *testing.T) {
 	for _, readFailure := range []bool{false, true} {
 		t.Run(fmt.Sprint(readFailure), func(t *testing.T) {
