@@ -551,6 +551,7 @@ func RunReviewRecover(args []string, stdout io.Writer) error {
 	base := strings.TrimSpace(*baseRef)
 	baseDiff := predecessorRecord.State.InitialSnapshot.Kind == reviewtransaction.TargetBaseDiff
 	overlay := predecessorRecord.State.InitialSnapshot.Kind == reviewtransaction.TargetBaseWorkspaceOverlay
+	explicitOverlayBase := overlay && base != "" && !*committedOnly
 	if *releaseScope && (base != "" || *committedOnly) {
 		return errors.New("--release-scope cannot be combined with --base-ref or --committed-only")
 	}
@@ -560,7 +561,7 @@ func RunReviewRecover(args []string, stdout io.Writer) error {
 	if *releaseScope && predecessorRecord.State.InitialSnapshot.Kind != reviewtransaction.TargetCurrentChanges {
 		return errors.New("--release-scope requires a current-changes predecessor")
 	}
-	if !*releaseScope && (*committedOnly != (base != "") || baseDiff != *committedOnly) {
+	if !*releaseScope && (*committedOnly != (base != "") || baseDiff != *committedOnly) && !explicitOverlayBase {
 		return errors.New("base-diff recovery requires matching --base-ref and --committed-only")
 	}
 	projection := predecessorRecord.State.InitialSnapshot.Projection
@@ -581,7 +582,10 @@ func RunReviewRecover(args []string, stdout io.Writer) error {
 	if *committedOnly {
 		target.Kind, target.BaseRef = reviewtransaction.TargetBaseDiff, base
 	} else if overlay {
-		target.Kind, target.BaseRef = reviewtransaction.TargetBaseWorkspaceOverlay, predecessorRecord.State.InitialSnapshot.BaseTree
+		target.Kind, target.BaseRef = reviewtransaction.TargetBaseWorkspaceOverlay, base
+		if target.BaseRef == "" {
+			target.BaseRef = predecessorRecord.State.InitialSnapshot.BaseTree
+		}
 	}
 	var snapshot reviewtransaction.Snapshot
 	if *releaseScope {
@@ -592,7 +596,7 @@ func RunReviewRecover(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if !*releaseScope && (baseDiff || overlay) && snapshot.BaseTree != predecessorRecord.State.InitialSnapshot.BaseTree {
+	if !*releaseScope && (baseDiff || overlay && base == "") && snapshot.BaseTree != predecessorRecord.State.InitialSnapshot.BaseTree {
 		return errors.New("recovery base-ref does not match predecessor base")
 	}
 	if !*releaseScope && (baseDiff || overlay) && snapshot.Identity == predecessorRecord.State.InitialSnapshot.Identity {

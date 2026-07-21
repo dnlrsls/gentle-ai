@@ -315,6 +315,67 @@ func TestNegotiatedOverlayStatusUsesResolvedStartBaseAfterSymbolicRefAdvances(t 
 }
 
 func TestReviewRecoverRetainsWorkspaceOverlayBaseAndScope(t *testing.T) {
+	repo, predecessor := approvedWorkspaceOverlayRecoveryPredecessor(t, "overlay-recovery-predecessor")
+	lineage := predecessor.State.LineageID
+	args := []string{"--cwd", repo, "--predecessor-lineage", lineage, "--expected-predecessor-revision", predecessor.Revision,
+		"--successor-lineage", "overlay-recovery-successor", "--disposition", "scope_changed", "--reason", "scope changed", "--actor", "maintainer"}
+	if err := RunReviewRecover(args, io.Discard); err == nil || !strings.Contains(err.Error(), "scope has not changed") {
+		t.Fatalf("unchanged overlay recovery error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "new.txt"), []byte("new scope\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunReviewRecover(args, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	successorStore, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, "overlay-recovery-successor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, err := successorStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := successor.State.InitialSnapshot
+	if snapshot.Kind != reviewtransaction.TargetBaseWorkspaceOverlay || snapshot.BaseTree != predecessor.State.InitialSnapshot.BaseTree || snapshot.Identity == predecessor.State.InitialSnapshot.Identity ||
+		!reflect.DeepEqual(snapshot.Paths, []string{"committed.txt", "new.txt", "tracked.txt"}) {
+		t.Fatalf("recovered overlay snapshot = %#v", snapshot)
+	}
+}
+
+func TestReviewRecoverAdoptsExplicitWorkspaceOverlayBase(t *testing.T) {
+	repo, predecessor := approvedWorkspaceOverlayRecoveryPredecessor(t, "overlay-explicit-base-predecessor")
+	declaredBase := strings.TrimSpace(runReviewCLIGit(t, repo, "rev-parse", "HEAD"))
+	declaredBaseTree := strings.TrimSpace(runReviewCLIGit(t, repo, "rev-parse", declaredBase+"^{tree}"))
+	args := []string{"--cwd", repo, "--predecessor-lineage", predecessor.State.LineageID, "--expected-predecessor-revision", predecessor.Revision,
+		"--successor-lineage", "overlay-explicit-base-successor", "--disposition", "scope_changed", "--reason", "base advanced", "--actor", "maintainer", "--base-ref", declaredBase}
+
+	if err := RunReviewRecover(args, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	successorStore, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, "overlay-explicit-base-successor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, err := successorStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := successor.State.InitialSnapshot
+	if snapshot.Kind != reviewtransaction.TargetBaseWorkspaceOverlay || snapshot.BaseTree != declaredBaseTree || snapshot.BaseTree == predecessor.State.InitialSnapshot.BaseTree || snapshot.Identity == predecessor.State.InitialSnapshot.Identity {
+		t.Fatalf("recovered overlay snapshot = %#v", snapshot)
+	}
+	assessment, err := reviewtransaction.AssessCompactGateTarget(context.Background(), repo, successor.State, reviewtransaction.NativeGateRequestInput{Gate: reviewtransaction.GatePostApply})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assessment.Applicability != reviewtransaction.CompactGateTargetExact || assessment.Actual.BaseTree != declaredBaseTree {
+		t.Fatalf("recovered overlay gate assessment = %#v", assessment)
+	}
+}
+
+func approvedWorkspaceOverlayRecoveryPredecessor(t *testing.T, lineage string) (string, reviewtransaction.CompactRecord) {
+	t.Helper()
 	repo := initReviewCLIRepo(t)
 	base := strings.TrimSpace(runReviewCLIGit(t, repo, "rev-parse", "HEAD"))
 	if err := os.WriteFile(filepath.Join(repo, "committed.txt"), []byte("committed\n"), 0o644); err != nil {
@@ -325,7 +386,6 @@ func TestReviewRecoverRetainsWorkspaceOverlayBaseAndScope(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("overlay\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	lineage := "overlay-recovery-predecessor"
 	if err := RunReviewFacadeStart([]string{"--cwd", repo, "--base-ref", base, "--workspace-overlay", "--lineage", lineage}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
@@ -359,30 +419,7 @@ func TestReviewRecoverRetainsWorkspaceOverlayBaseAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"--cwd", repo, "--predecessor-lineage", lineage, "--expected-predecessor-revision", predecessor.Revision,
-		"--successor-lineage", "overlay-recovery-successor", "--disposition", "scope_changed", "--reason", "scope changed", "--actor", "maintainer"}
-	if err := RunReviewRecover(args, io.Discard); err == nil || !strings.Contains(err.Error(), "scope has not changed") {
-		t.Fatalf("unchanged overlay recovery error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(repo, "new.txt"), []byte("new scope\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := RunReviewRecover(args, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	successorStore, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, "overlay-recovery-successor")
-	if err != nil {
-		t.Fatal(err)
-	}
-	successor, err := successorStore.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	snapshot := successor.State.InitialSnapshot
-	if snapshot.Kind != reviewtransaction.TargetBaseWorkspaceOverlay || snapshot.BaseTree != predecessor.State.InitialSnapshot.BaseTree || snapshot.Identity == predecessor.State.InitialSnapshot.Identity ||
-		!reflect.DeepEqual(snapshot.Paths, []string{"committed.txt", "new.txt", "tracked.txt"}) {
-		t.Fatalf("recovered overlay snapshot = %#v", snapshot)
-	}
+	return repo, predecessor
 }
 
 func TestReviewRecoverSelectsAuthorizedStagedProjection(t *testing.T) {

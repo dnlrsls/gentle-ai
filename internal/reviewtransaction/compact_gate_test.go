@@ -1128,6 +1128,53 @@ func TestCompactPrePRGateInvalidatesSelectedBaseAndHeadRaces(t *testing.T) {
 	}
 }
 
+func TestCompactPrePRCompatibleAdvanceRevalidatesArtifactsAtFinalAuthorization(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(t *testing.T, fixture *compatiblePrePRFixture)
+	}{
+		{name: "policy replaced", mutate: func(t *testing.T, fixture *compatiblePrePRFixture) {
+			if err := os.WriteFile(fixture.policyPath, []byte("replaced policy\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "policy removed", mutate: func(t *testing.T, fixture *compatiblePrePRFixture) {
+			if err := os.Remove(fixture.policyPath); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "attestation replaced", mutate: func(t *testing.T, fixture *compatiblePrePRFixture) {
+			if err := os.WriteFile(fixture.attestationPath, []byte(`{}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "attestation removed", mutate: func(t *testing.T, fixture *compatiblePrePRFixture) {
+			if err := os.Remove(fixture.attestationPath); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompatiblePrePRFixture(t, "delivery.txt", "base-only.txt")
+			state, receipt := approvedCompactPrePRFixture(t, fixture)
+			originalHook := finalGateAuthorizationHook
+			finalGateAuthorizationHook = func() {
+				finalGateAuthorizationHook = originalHook
+				tt.mutate(t, fixture)
+			}
+			t.Cleanup(func() { finalGateAuthorizationHook = originalHook })
+
+			got := EvaluateCompactGate(context.Background(), fixture.repo, receipt, NativeGateRequestInput{
+				Gate: GatePrePR, LineageID: state.LineageID, BaseRef: "main",
+				PolicyArtifact: fixture.policyPath, PrePRCIAttestation: fixture.attestationPath,
+			})
+			if got.Result != GateInvalidated {
+				t.Fatalf("artifact mutation during final authorization = %#v", got)
+			}
+		})
+	}
+}
+
 func approvedCompactRevisionFixture(t *testing.T, repo, lineage string) (CompactState, CompactStore, CompactReceipt) {
 	t.Helper()
 	state := newCompactRevisionState(t, repo, lineage)

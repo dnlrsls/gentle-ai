@@ -305,7 +305,8 @@ func validateLiveRecoverySuccessor(ctx context.Context, repo string, expected Sn
 }
 
 func compactRecoveryScopeChanged(previous, next Snapshot) bool {
-	return previous.CandidateTree != next.CandidateTree || previous.PathsDigest != next.PathsDigest || previous.Kind == next.Kind && previous.BaseTree != next.BaseTree
+	relation := classifyCompactTargetRelation(previous, next, previous.Paths, compactTargetRelationEvidence{ExplicitScopeChange: true})
+	return relation.Kind != compactTargetSame && relation.Kind != compactTargetUnsafe
 }
 
 func compactReleaseScopeRecovery(predecessor CompactState, next Snapshot) bool {
@@ -415,31 +416,17 @@ func compactRecoveryAuthorizationError(snapshot Snapshot) error {
 }
 
 func compactRecoveryAddsGenesisPath(predecessor CompactState, live Snapshot) bool {
-	paths, pathErr := canonicalPaths(live.Paths)
-	genesis, genesisErr := canonicalPaths(predecessor.GenesisPaths)
-	if pathErr != nil || genesisErr != nil || !equalStrings(paths, live.Paths) || !equalStrings(genesis, predecessor.GenesisPaths) {
+	if classifyCompactPathSetRelation(predecessor.GenesisPaths, live.Paths) != compactPathsOverlap {
 		return false
 	}
-	known := make(map[string]struct{}, len(genesis))
-	for _, path := range genesis {
-		known[path] = struct{}{}
-	}
-	retained := false
-	reaches := false
-	for _, path := range paths {
-		if _, exists := known[path]; exists {
-			retained = true
-			continue
-		}
-		reaches = true
-	}
+	reaches := pathsAreSubset(live.Paths, predecessor.GenesisPaths) != nil
 	// An expansion must still be the frozen work: it retains at least one
 	// genesis path and reaches past the set. A live scope disjoint from genesis
 	// is unrelated work, not a wider view of this lineage, so it must not be
 	// admitted here. Worktrees of one repository share the review store and a
 	// base tree, so without the retention test an unrelated candidate would be
 	// captured by whichever stale lineage happened to be enumerated first.
-	return retained && reaches
+	return reaches
 }
 
 // compactRecoveryContractsGenesisPaths reports whether the live repository
@@ -447,15 +434,7 @@ func compactRecoveryAddsGenesisPath(predecessor CompactState, live Snapshot) boo
 // subset with no live path outside genesis. Disjoint or overlapping-different
 // path sets never qualify; they remain governed by the expansion rule.
 func compactRecoveryContractsGenesisPaths(predecessor CompactState, live Snapshot) bool {
-	paths, pathErr := canonicalPaths(live.Paths)
-	genesis, genesisErr := canonicalPaths(predecessor.GenesisPaths)
-	if pathErr != nil || genesisErr != nil || !equalStrings(paths, live.Paths) || !equalStrings(genesis, predecessor.GenesisPaths) {
-		return false
-	}
-	if len(paths) == 0 || len(paths) >= len(genesis) {
-		return false
-	}
-	return pathsAreSubset(paths, genesis) == nil
+	return classifyCompactPathSetRelation(predecessor.GenesisPaths, live.Paths) == compactPathsContraction
 }
 
 func CompactAuthorityLeaves(ctx context.Context, repo string) ([]CompactStore, error) {
