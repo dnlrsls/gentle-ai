@@ -108,7 +108,28 @@ Missing context is different from a valid empty candidate: the latter is encoded
 
 Reviewer results may omit the top-level `lens`; when present, it must match the selected-lens position returned by start. Both the short names (`risk`, `resilience`, `readability`, `reliability`) and the negotiated facade names (`review-risk`, `review-resilience`, `review-readability`, `review-reliability`) map to the same native lenses. A mismatch is rejected before authority mutation instead of being overwritten.
 
-Durable controllers capture each result with exact lineage, target, lens, and selected order, then pass the emitted manifests to FINALIZE as ordered `--result-artifact` values. Legacy `--result` files remain compatible but cannot be mixed with artifact manifests and are not a durable cross-agent handoff.
+Durable controllers capture each result with exact lineage, target, lens, and selected order, write each emitted manifest to its own file, then pass those files to FINALIZE in selected-lens order with repeatable `--result-artifact-file <path>` flags. A `--result-artifact-file -` occurrence reads exactly one manifest from stdin; because FINALIZE has one shared stdin, `-` may appear only once across reviewer results, artifact manifests, validation, refuter outcomes, and evidence.
+
+Windows PowerShell 5.1 should use file transport because native argument reconstruction does not preserve dynamic inline JSON reliably. Write BOM-less UTF-8 so the strict JSON decoder receives the manifest bytes directly:
+
+```powershell
+$manifest = & gentle-ai review capture-result --cwd $repo --lineage $lineage --target $target --lens $lens --order $order --input $resultPath
+$manifestPath = Join-Path $env:TEMP "gentle-ai-review-manifest.json"
+$manifestText = [string]::Join([Environment]::NewLine, [string[]]$manifest)
+[System.IO.File]::WriteAllText($manifestPath, $manifestText, (New-Object System.Text.UTF8Encoding($false)))
+& gentle-ai review finalize --cwd $repo --lineage $lineage --result-artifact-file $manifestPath
+```
+
+Repeat `--result-artifact-file` once per selected lens. Each file contains one canonical manifest, and Gentle AI preserves its path bytes for the existing strict schema, lineage, target, lens, selected-order, owned artifact path, lowercase SHA-256, file identity, payload, and hash checks. File transport does not normalize paths.
+
+The POSIX inline form remains fully compatible:
+
+```bash
+gentle-ai review finalize --cwd "$repo" --lineage "$lineage" \
+  --result-artifact "$manifest_json"
+```
+
+Inline `--result-artifact`, file/stdin `--result-artifact-file`, legacy `--result`, and `--captured-results` are mutually exclusive reviewer-result sources. Legacy `--result` files remain compatible but are not a durable cross-agent handoff.
 
 Proof and evidence strings accept ordinary technical notation, including `HEAD^{tree}`, `{}`, `<A>`, and `=>`. Blank values and exact non-evidence sentinels such as `n/a`, `none`, `todo`, `tbd`, `pass`, `passed`, `success`, and `placeholder` remain invalid.
 
