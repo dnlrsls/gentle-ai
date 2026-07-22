@@ -665,7 +665,7 @@ func NewModel(detection system.DetectionResult, version string, installState ...
 		ModelAssignments:       installStateModelAssignments(s.ModelAssignments),
 	}
 	s.RestoreSelection(&selection)
-	if isPiOnlyAgents(agents) && s.SelectionConfigured && s.Persona != "" {
+	if s.SelectionConfigured && s.Persona != "" && (isPiOnlyAgents(agents) || s.Persona == string(model.PersonaGentleman) || s.Persona == string(model.PersonaGentlemanNeutralArtifacts) || s.Persona == string(model.PersonaNeutral) || s.Persona == string(model.PersonaCustom)) {
 		selection.Persona = model.PersonaID(s.Persona)
 	}
 
@@ -3718,11 +3718,13 @@ func (m *Model) toggleCurrentAgent() {
 	for idx, selected := range m.Selection.Agents {
 		if selected == agent {
 			m.Selection.Agents = append(m.Selection.Agents[:idx], m.Selection.Agents[idx+1:]...)
+			m.configured = false
 			return
 		}
 	}
 
 	m.Selection.Agents = append(m.Selection.Agents, agent)
+	m.configured = false
 }
 
 func (m *Model) toggleCurrentComponent() {

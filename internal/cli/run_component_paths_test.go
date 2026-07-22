@@ -36,7 +36,7 @@ func TestComponentPersonaPiUsesRequestedScope(t *testing.T) {
 			targetRoot := map[InstallScope]string{ScopeGlobal: home, ScopeWorkspace: workspace}[scope]
 			step := componentApplyStep{id: "component:persona", component: model.ComponentPersona, homeDir: home, workspaceDir: workspace, scope: scope, agents: []model.AgentID{model.AgentPi}, selection: model.Selection{Persona: model.PersonaNeutral}}
 			if err := step.Run(); err != nil {
-				t.Fatalf("componentApplyStep.Run() error = %v", err)
+				t.Fatal(err)
 			}
 			personaPath := filepath.Join(targetRoot, ".pi", "gentle-ai", "persona.json")
 			if _, err := os.Stat(personaPath); err != nil {

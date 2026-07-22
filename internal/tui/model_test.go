@@ -452,6 +452,31 @@ func TestNewModelPiOnlyConfiguredSelectionPreservesPersona(t *testing.T) {
 	}
 }
 
+func TestConfiguredNonPiSelectionChangedToPiUsesPiDefaultsAndPersona(t *testing.T) {
+	m := NewModel(system.DetectionResult{}, "dev", state.InstallState{
+		InstalledAgents:     []string{string(model.AgentClaudeCode)},
+		SelectionConfigured: true,
+		Components:          []model.ComponentID{model.ComponentSDD},
+		Persona:             string(model.PersonaNeutral),
+	})
+	m.Screen, m.Cursor = ScreenAgents, agentOptionCursor(model.AgentClaudeCode)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = updated.(Model)
+	m.Cursor = agentOptionCursor(model.AgentPi)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = updated.(Model)
+	m.Cursor = len(screensAgentOptions())
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+
+	if m.Screen != ScreenDependencyTree || !reflect.DeepEqual(m.Selection.Agents, []model.AgentID{model.AgentPi}) {
+		t.Fatalf("Pi transition screen/agents = %v/%v, want dependency tree/[pi]", m.Screen, m.Selection.Agents)
+	}
+	if !reflect.DeepEqual(m.Selection.Components, piOnlyComponents()) || m.Selection.Persona != model.PersonaNeutral {
+		t.Fatalf("Pi transition components/persona = %v/%q, want %v/%q", m.Selection.Components, m.Selection.Persona, piOnlyComponents(), model.PersonaNeutral)
+	}
+}
+
 func TestPiCombinedWithOtherAgentKeepsGenericFlow(t *testing.T) {
 	m := NewModel(system.DetectionResult{}, "dev")
 	m.Screen = ScreenAgents
@@ -1073,6 +1098,15 @@ func TestSDDModeMultiShowsModelPickerWhenCacheExists(t *testing.T) {
 
 func screensAgentOptions() []model.AgentID {
 	return screens.AgentOptions()
+}
+
+func agentOptionCursor(target model.AgentID) int {
+	for i, agent := range screensAgentOptions() {
+		if agent == target {
+			return i
+		}
+	}
+	return -1
 }
 
 // ─── OperationRunning guard: Enter blocked ──────────────────────────────────

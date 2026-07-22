@@ -2933,65 +2933,18 @@ func TestHermesPersonaAssetsContainIdentitySection(t *testing.T) {
 }
 func TestPiPersonaConfigFollowsSelectedPersona(t *testing.T) {
 	tests := []struct {
-		name        string
-		forSync     bool
-		persona     model.PersonaID
-		existing    string
-		wantMode    string
-		wantChanged bool
-		wantErr     bool
+		name, existing, wantMode      string
+		persona                       model.PersonaID
+		forSync, wantChanged, wantErr bool
 	}{
-		{
-			name:        "install maps gentleman",
-			persona:     model.PersonaGentleman,
-			wantMode:    "gentleman",
-			wantChanged: true,
-		},
-		{
-			name:        "sync maps neutral",
-			forSync:     true,
-			persona:     model.PersonaNeutral,
-			wantMode:    "neutral",
-			wantChanged: true,
-		},
-		{
-			name:        "legacy artifact persona maps to gentleman and preserves sibling fields",
-			persona:     model.PersonaGentlemanNeutralArtifacts,
-			existing:    `{"userSetting":true,"largeNumber":9007199254740993,"mode":"neutral"}`,
-			wantMode:    "gentleman",
-			wantChanged: true,
-		},
-		{
-			name:        "matching mode does not rewrite configuration",
-			persona:     model.PersonaGentleman,
-			existing:    `{"mode":"gentleman","userSetting":true}`,
-			wantMode:    "gentleman",
-			wantChanged: false,
-		},
-		{
-			name:        "custom preserves existing Pi configuration",
-			persona:     model.PersonaCustom,
-			existing:    `{"mode":"neutral","userSetting":true}`,
-			wantChanged: false,
-		},
-		{
-			name:     "unsupported persona leaves existing configuration untouched",
-			persona:  model.PersonaID("unsupported"),
-			existing: `{"mode":"gentleman","userSetting":true}`,
-			wantErr:  true,
-		},
-		{
-			name:     "malformed configuration is not overwritten",
-			persona:  model.PersonaNeutral,
-			existing: `{"mode":`,
-			wantErr:  true,
-		},
-		{
-			name:     "non-object configuration is not overwritten",
-			persona:  model.PersonaNeutral,
-			existing: `["mode"]`,
-			wantErr:  true,
-		},
+		{"install maps gentleman", "", "gentleman", model.PersonaGentleman, false, true, false},
+		{"sync maps neutral", "", "neutral", model.PersonaNeutral, true, true, false},
+		{"legacy artifact preserves siblings", `{"userSetting":true,"largeNumber":9007199254740993,"mode":"neutral"}`, "gentleman", model.PersonaGentlemanNeutralArtifacts, false, true, false},
+		{"matching mode is idempotent", `{"mode":"gentleman","userSetting":true}`, "gentleman", model.PersonaGentleman, false, false, false},
+		{"custom preserves configuration", `{"mode":"neutral","userSetting":true}`, "", model.PersonaCustom, false, false, false},
+		{"unsupported preserves configuration", `{"mode":"gentleman","userSetting":true}`, "", model.PersonaID("unsupported"), false, false, true},
+		{"malformed configuration is protected", `{"mode":`, "", model.PersonaNeutral, false, false, true},
+		{"non-object configuration is protected", `["mode"]`, "", model.PersonaNeutral, false, false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2999,10 +2952,10 @@ func TestPiPersonaConfigFollowsSelectedPersona(t *testing.T) {
 			path := filepath.Join(home, ".pi", "gentle-ai", "persona.json")
 			if tt.existing != "" {
 				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-					t.Fatalf("MkdirAll() error = %v", err)
+					t.Fatal(err)
 				}
 				if err := os.WriteFile(path, []byte(tt.existing), 0o644); err != nil {
-					t.Fatalf("WriteFile() error = %v", err)
+					t.Fatal(err)
 				}
 			}
 			inject := Inject
@@ -3010,21 +2963,15 @@ func TestPiPersonaConfigFollowsSelectedPersona(t *testing.T) {
 				inject = InjectForSync
 			}
 			result, err := inject(home, piAdapter(), tt.persona)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Pi persona injection error = %v, want error = %v", err, tt.wantErr)
+			}
 			if tt.wantErr {
-				if err == nil {
-					t.Fatal("Pi persona injection error = nil, want error")
-				}
 				content, readErr := os.ReadFile(path)
-				if readErr != nil {
-					t.Fatalf("ReadFile() error = %v", readErr)
-				}
-				if string(content) != tt.existing {
-					t.Fatalf("Pi persona config changed after error: got %q, want %q", content, tt.existing)
+				if readErr != nil || string(content) != tt.existing {
+					t.Fatalf("Pi persona config changed after error: %q / %v", content, readErr)
 				}
 				return
-			}
-			if err != nil {
-				t.Fatalf("Pi persona injection error = %v", err)
 			}
 			if result.Changed != tt.wantChanged {
 				t.Fatalf("Pi persona injection changed = %v, want %v", result.Changed, tt.wantChanged)
@@ -3032,11 +2979,11 @@ func TestPiPersonaConfigFollowsSelectedPersona(t *testing.T) {
 			if tt.wantMode != "" {
 				content, readErr := os.ReadFile(path)
 				if readErr != nil {
-					t.Fatalf("ReadFile() error = %v", readErr)
+					t.Fatal(readErr)
 				}
 				var config map[string]any
 				if err := json.Unmarshal(content, &config); err != nil {
-					t.Fatalf("Unmarshal() error = %v", err)
+					t.Fatal(err)
 				}
 				if config["mode"] != tt.wantMode {
 					t.Fatalf("mode = %q, want %q", config["mode"], tt.wantMode)

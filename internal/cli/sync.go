@@ -1272,6 +1272,9 @@ func selectionWritesPiPersona(selection model.Selection) bool {
 func RunSyncWithSelection(homeDir string, selection model.Selection) (SyncResult, error) {
 	agentIDs := selection.Agents
 	persistedState, persistedStateErr := state.Read(homeDir)
+	if persistedStateErr != nil && !errors.Is(persistedStateErr, os.ErrNotExist) && selectionWritesPiPersona(selection) {
+		return SyncResult{Agents: agentIDs, Selection: selection}, fmt.Errorf("read persisted state for Pi persona sync: %w", persistedStateErr)
+	}
 	restorePersistedCommunityTools(homeDir, &selection, persistedState)
 
 	// Resolve persona from persisted state when the caller has not provided one.
@@ -1379,7 +1382,10 @@ func RunSync(args []string) (SyncResult, error) {
 	// Read state once for both model-assignment restoration and persona resolution.
 	// On error (e.g. state.json absent), treat persisted values as empty — model
 	// maps stay as-is and persona falls back to neutral.
-	persistedState, _ := state.Read(homeDir)
+	persistedState, persistedStateErr := state.Read(homeDir)
+	if persistedStateErr != nil && !errors.Is(persistedStateErr, os.ErrNotExist) && selectionWritesPiPersona(selection) {
+		return SyncResult{}, fmt.Errorf("read persisted state for Pi persona sync: %w", persistedStateErr)
+	}
 	RestorePersistedSelection(&selection, persistedState, flags)
 	restorePersistedCommunityTools(homeDir, &selection, persistedState)
 

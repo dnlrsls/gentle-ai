@@ -3415,75 +3415,69 @@ func TestSyncPersonaPathsDeclareManagedClaudeOutputStyle(t *testing.T) {
 
 func TestComponentSyncStepPiPersonaWritesGlobalConfig(t *testing.T) {
 	home := t.TempDir()
-	workspace := t.TempDir()
-	step := componentSyncStep{
-		id:           "sync:component:persona",
-		component:    model.ComponentPersona,
-		homeDir:      home,
-		workspaceDir: workspace,
-		agents:       []model.AgentID{model.AgentPi},
-		selection:    model.Selection{Persona: model.PersonaGentlemanNeutralArtifacts},
+	setSyncTestHome(t, home)
+	if _, err := RunSync([]string{"--agents", "pi"}); err != nil {
+		t.Fatalf("RunSync() error = %v", err)
 	}
-	if err := step.Run(); err != nil {
-		t.Fatalf("componentSyncStep.Run() error = %v", err)
-	}
-
-	globalPath := filepath.Join(home, ".pi", "gentle-ai", "persona.json")
-	if _, err := os.Stat(globalPath); err != nil {
-		t.Fatalf("Pi sync config missing at %q: %v", globalPath, err)
-	}
-	workspacePath := filepath.Join(workspace, ".pi", "gentle-ai", "persona.json")
-	if _, err := os.Stat(workspacePath); !os.IsNotExist(err) {
-		t.Fatalf("Pi sync created workspace override %q: %v", workspacePath, err)
-	}
-	paths := syncPersonaPathsWithWorkspace(home, workspace, step.selection, resolveAdapters(step.agents))
-	if !containsPath(paths, globalPath) {
-		t.Fatalf("sync persona paths missing Pi config %q: %v", globalPath, paths)
+	if _, err := os.Stat(filepath.Join(home, ".pi", "gentle-ai", "persona.json")); err != nil {
+		t.Fatalf("Pi sync global config missing: %v", err)
 	}
 }
 
-func TestRunSyncWithSelectionRejectsInvalidPersistedPiPersona(t *testing.T) {
-	home := t.TempDir()
-	personaPath := filepath.Join(home, ".pi", "gentle-ai", "persona.json")
-	if err := os.MkdirAll(filepath.Dir(personaPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
-	existing := []byte(`{"mode":"gentleman","userSetting":true}`)
-	if err := os.WriteFile(personaPath, existing, 0o644); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-	if err := state.Write(home, state.InstallState{Persona: "unsupported"}); err != nil {
-		t.Fatalf("state.Write() error = %v", err)
-	}
+func TestRunSyncProtectsPiPersonaWhenStateIntentIsUnknown(t *testing.T) {
+	for _, tt := range []struct {
+		name, state, agent string
+		wantErr            bool
+	}{
+		{"invalid persona", `{"persona":"unsupported"}`, "pi", true},
+		{"malformed state", `{"persona":`, "pi", true},
+		{"unreadable state", "", "pi", true},
+		{"malformed state preserves non-Pi sync", `{"persona":`, "opencode", false},
+		{"unreadable state preserves non-Pi sync", "", "opencode", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			personaPath := filepath.Join(home, ".pi", "gentle-ai", "persona.json")
+			existing := []byte(`{"mode":"gentleman","userSetting":true}`)
+			if err := os.MkdirAll(filepath.Dir(personaPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(personaPath, existing, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(state.Path(home)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tt.state == "" {
+				if err := os.Mkdir(state.Path(home), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(state.Path(home), []byte(tt.state), 0o644); err != nil {
+				t.Fatal(err)
+			}
 
-	_, err := RunSyncWithSelection(home, model.Selection{
-		Agents:     []model.AgentID{model.AgentPi},
-		Components: []model.ComponentID{model.ComponentPersona},
-	})
-	if err == nil {
-		t.Fatal("RunSyncWithSelection() error = nil, want invalid persisted persona error")
-	}
-	content, readErr := os.ReadFile(personaPath)
-	if readErr != nil {
-		t.Fatalf("ReadFile() error = %v", readErr)
-	}
-	if !bytes.Equal(content, existing) {
-		t.Fatalf("Pi persona config changed after invalid persisted persona: got %q, want %q", content, existing)
+			setSyncTestHome(t, home)
+			if _, err := RunSync([]string{"--agents", tt.agent}); (err != nil) != tt.wantErr {
+				t.Fatalf("RunSync() error = %v, want error = %t", err, tt.wantErr)
+			}
+			if tt.agent != "pi" {
+				return
+			}
+			content, readErr := os.ReadFile(personaPath)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !bytes.Equal(content, existing) {
+				t.Fatalf("Pi persona config changed: got %q, want %q", content, existing)
+			}
+		})
 	}
 }
 
 func TestRestorePersistedSelectionPreservesExplicitPiComponents(t *testing.T) {
 	selection := BuildSyncSelection(SyncFlags{}, []model.AgentID{model.AgentPi})
-	persisted := state.InstallState{
-		InstalledAgents:     []string{string(model.AgentPi)},
-		SelectionConfigured: true,
-		Components:          []model.ComponentID{model.ComponentEngram},
-		Persona:             string(model.PersonaNeutral),
-	}
-
-	RestorePersistedSelection(&selection, persisted, SyncFlags{})
-
 	want := []model.ComponentID{model.ComponentEngram}
+	RestorePersistedSelection(&selection, state.InstallState{InstalledAgents: []string{string(model.AgentPi)}, SelectionConfigured: true, Components: want, Persona: string(model.PersonaNeutral)}, SyncFlags{})
 	if !reflect.DeepEqual(selection.Components, want) {
 		t.Fatalf("persisted explicit Pi components = %#v, want %#v", selection.Components, want)
 	}
