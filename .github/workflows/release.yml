@@ -34,6 +34,17 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Resolve release distribution plan without publishing
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: v2.15.2
+          args: release --snapshot --clean --skip=sign,publish
+        env:
+          MINISIGN_PUBLIC_KEYS_CANONICAL: release-policy-validation-only
+
+      - name: Verify release distribution policy
+        run: ./scripts/verify-release-distribution-policy.sh
+
       - name: Verify tag, main, trust anchors, and module immutability
         run: ./scripts/release-preflight.sh
 

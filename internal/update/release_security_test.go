@@ -142,8 +142,9 @@ func TestReleaseSecurityScriptsAreSyntacticallyValidAndFailClosed(t *testing.T) 
 		{
 			path: "verify-release-distribution-policy.sh",
 			required: []string{
-				`Windows release targets are disabled`,
-				`Scoop publication is disabled`,
+				`goos must be explicitly and exactly linux, darwin`,
+				`resolved Homebrew publisher changed`,
+				`release workflow action allowlist changed`,
 				`mock signing is forbidden`,
 			},
 		},

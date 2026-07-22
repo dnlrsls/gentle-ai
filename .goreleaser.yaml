@@ -34,6 +34,7 @@ archives:
 
 checksum:
   name_template: "checksums.txt"
+  algorithm: sha256
 
 # Sign only the checksum manifest. The signed trusted comment binds the exact
 # repository and tag; the updater rejects a valid signature copied from any

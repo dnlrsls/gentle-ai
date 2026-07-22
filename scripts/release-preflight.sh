@@ -17,7 +17,6 @@ require_env GITHUB_REF_NAME
 require_env GITHUB_SHA
 [[ "$GITHUB_REPOSITORY" == "Gentleman-Programming/gentle-ai" ]] || die "unexpected repository $GITHUB_REPOSITORY"
 [[ "$GITHUB_REF_TYPE" == "tag" ]] || die "release must run from a tag push"
-./scripts/verify-release-distribution-policy.sh
 
 tag=$GITHUB_REF_NAME
 [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || die "tag must be exact stable semver (vMAJOR.MINOR.PATCH)"

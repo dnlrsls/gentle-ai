@@ -46,9 +46,9 @@ func TestOfficialReleaseOmitsUnsignedWindowsDistribution(t *testing.T) {
 		}
 	}
 
-	preflight := readRepositoryFile(t, "scripts", "release-preflight.sh")
-	if !strings.Contains(preflight, "verify-release-distribution-policy.sh") {
-		t.Fatal("release preflight does not enforce the Windows omission policy")
+	if !strings.Contains(workflow, "Resolve release distribution plan without publishing") ||
+		!strings.Contains(workflow, "./scripts/verify-release-distribution-policy.sh") {
+		t.Fatal("release workflow does not resolve and validate the distribution plan before publication")
 	}
 }
 
@@ -74,45 +74,126 @@ func TestWindowsInstallAndUpgradeContainNoRemoteBinaryOrScriptPath(t *testing.T)
 }
 
 func TestReleaseDistributionPolicyAssertionFailsClosed(t *testing.T) {
-	script := filepath.Join("..", "..", "scripts", "verify-release-distribution-policy.sh")
-	if _, err := os.Stat(script); err != nil {
-		t.Fatalf("distribution policy assertion is unavailable: %v", err)
-	}
-
-	valid := filepath.Join(t.TempDir(), "valid.yaml")
-	if err := os.WriteFile(valid, []byte("builds:\n  - goos:\n      - linux\n      - darwin\nbrews:\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if output, err := exec.Command("bash", script, valid).CombinedOutput(); err != nil {
-		t.Fatalf("policy rejected non-Windows fixture: %v\n%s", err, output)
+	root := newReleasePolicyFixture(t)
+	if output, err := runReleasePolicy(root); err != nil {
+		t.Fatalf("policy rejected the approved release plan: %v\n%s", err, output)
 	}
 
 	for _, tc := range []struct {
 		name   string
-		config string
+		mutate func(*testing.T, string)
 	}{
-		{name: "Windows target", config: "builds:\n  - goos: [linux, windows]\n"},
-		{name: "Scoop publisher", config: "scoops:\n  - name: gentle-ai\n"},
+		{
+			name: "omitted goos uses unsafe GoReleaser defaults",
+			mutate: func(t *testing.T, root string) {
+				replaceReleasePolicyFile(t, root, ".goreleaser.yaml", "    goos:\n      - linux\n      - darwin\n", "")
+			},
+		},
+		{
+			name: "extra build target",
+			mutate: func(t *testing.T, root string) {
+				replaceReleasePolicyFile(t, root, ".goreleaser.yaml", "      - darwin\n    goarch:", "      - darwin\n      - freebsd\n    goarch:")
+			},
+		},
+		{
+			name: "extra archive format",
+			mutate: func(t *testing.T, root string) {
+				replaceReleasePolicyFile(t, root, ".goreleaser.yaml", "      - tar.gz\n", "      - tar.gz\n      - zip\n")
+			},
+		},
+		{
+			name: "alternate publication config",
+			mutate: func(t *testing.T, root string) {
+				replaceReleasePolicyFile(t, root, filepath.Join(".github", "workflows", "release.yml"), "args: release --clean", "args: release --clean --config .goreleaser-alternate.yaml")
+			},
+		},
+		{
+			name: "separate workflow upload action",
+			mutate: func(t *testing.T, root string) {
+				replaceReleasePolicyFile(t, root, filepath.Join(".github", "workflows", "release.yml"), "      - name: Verify published assets from GitHub\n", "      - name: Upload release asset separately\n        uses: actions/upload-artifact@v4\n\n      - name: Verify published assets from GitHub\n")
+			},
+		},
+		{
+			name: "renamed canonical config",
+			mutate: func(t *testing.T, root string) {
+				if err := os.Rename(filepath.Join(root, ".goreleaser.yaml"), filepath.Join(root, ".goreleaser-renamed.yaml")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "unexpected resolved Windows artifact",
+			mutate: func(t *testing.T, root string) {
+				replaceReleasePolicyFile(t, root, filepath.Join("dist", "artifacts.json"), "\n]", ",\n  {"+`"name":"gentle-ai","path":"dist/gentle-ai_windows_amd64_v1/gentle-ai.exe","goos":"windows","goarch":"amd64","target":"windows_amd64_v1","type":"Binary","extra":{"Binary":"gentle-ai","ID":"gentle-ai"}`+"}\n]")
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "goreleaser.yaml")
-			if err := os.WriteFile(path, []byte(tc.config), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if output, err := exec.Command("bash", script, path).CombinedOutput(); err == nil {
-				t.Fatalf("policy accepted forbidden config:\n%s", output)
+			root := newReleasePolicyFixture(t)
+			tc.mutate(t, root)
+			if output, err := runReleasePolicy(root); err == nil {
+				t.Fatalf("policy accepted a release-plan bypass:\n%s", output)
 			}
 		})
 	}
+}
 
-	mockWorkflow := filepath.Join(t.TempDir(), "release.yml")
-	if err := os.WriteFile(mockWorkflow, []byte("steps:\n  - run: echo Mock signing Windows binary\n"), 0o600); err != nil {
+func newReleasePolicyFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	files := map[string]string{
+		".goreleaser.yaml": readRepositoryFile(t, ".goreleaser.yaml"),
+		filepath.Join(".github", "workflows", "release.yml"):              readRepositoryFile(t, ".github", "workflows", "release.yml"),
+		filepath.Join("scripts", "verify-release-distribution-policy.sh"): readRepositoryFile(t, "scripts", "verify-release-distribution-policy.sh"),
+		filepath.Join("dist", "artifacts.json"):                           releasePolicyArtifactsFixture,
+	}
+	for path, content := range files {
+		fullPath := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func runReleasePolicy(root string) ([]byte, error) {
+	command := exec.Command("bash", filepath.Join("scripts", "verify-release-distribution-policy.sh"))
+	command.Dir = root
+	return command.CombinedOutput()
+}
+
+func replaceReleasePolicyFile(t *testing.T, root, path, old, replacement string) {
+	t.Helper()
+	fullPath := filepath.Join(root, path)
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if output, err := exec.Command("bash", script, valid, mockWorkflow).CombinedOutput(); err == nil {
-		t.Fatalf("policy accepted mock signing workflow:\n%s", output)
+	if !strings.Contains(string(content), old) {
+		t.Fatalf("fixture %s does not contain mutation target %q", path, old)
+	}
+	updated := strings.Replace(string(content), old, replacement, 1)
+	if err := os.WriteFile(fullPath, []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
+
+const releasePolicyArtifactsFixture = `[
+  {"name":"metadata.json","path":"dist/metadata.json","type":"Metadata"},
+  {"name":"gentle-ai","path":"dist/gentle-ai_linux_amd64_v1/gentle-ai","goos":"linux","goarch":"amd64","target":"linux_amd64_v1","type":"Binary","extra":{"Binary":"gentle-ai","ID":"gentle-ai"}},
+  {"name":"gentle-ai","path":"dist/gentle-ai_linux_arm64_v8.0/gentle-ai","goos":"linux","goarch":"arm64","target":"linux_arm64_v8.0","type":"Binary","extra":{"Binary":"gentle-ai","ID":"gentle-ai"}},
+  {"name":"gentle-ai","path":"dist/gentle-ai_darwin_amd64_v1/gentle-ai","goos":"darwin","goarch":"amd64","target":"darwin_amd64_v1","type":"Binary","extra":{"Binary":"gentle-ai","ID":"gentle-ai"}},
+  {"name":"gentle-ai","path":"dist/gentle-ai_darwin_arm64_v8.0/gentle-ai","goos":"darwin","goarch":"arm64","target":"darwin_arm64_v8.0","type":"Binary","extra":{"Binary":"gentle-ai","ID":"gentle-ai"}},
+  {"name":"gentle-ai_0.0.0-SNAPSHOT_linux_amd64.tar.gz","path":"dist/gentle-ai_0.0.0-SNAPSHOT_linux_amd64.tar.gz","goos":"linux","goarch":"amd64","target":"linux_amd64_v1","type":"Archive","extra":{"Binaries":["gentle-ai"],"Format":"tar.gz","ID":"default"}},
+  {"name":"gentle-ai_0.0.0-SNAPSHOT_linux_arm64.tar.gz","path":"dist/gentle-ai_0.0.0-SNAPSHOT_linux_arm64.tar.gz","goos":"linux","goarch":"arm64","target":"linux_arm64_v8.0","type":"Archive","extra":{"Binaries":["gentle-ai"],"Format":"tar.gz","ID":"default"}},
+  {"name":"gentle-ai_0.0.0-SNAPSHOT_darwin_amd64.tar.gz","path":"dist/gentle-ai_0.0.0-SNAPSHOT_darwin_amd64.tar.gz","goos":"darwin","goarch":"amd64","target":"darwin_amd64_v1","type":"Archive","extra":{"Binaries":["gentle-ai"],"Format":"tar.gz","ID":"default"}},
+  {"name":"gentle-ai_0.0.0-SNAPSHOT_darwin_arm64.tar.gz","path":"dist/gentle-ai_0.0.0-SNAPSHOT_darwin_arm64.tar.gz","goos":"darwin","goarch":"arm64","target":"darwin_arm64_v8.0","type":"Archive","extra":{"Binaries":["gentle-ai"],"Format":"tar.gz","ID":"default"}},
+  {"name":"checksums.txt","path":"dist/checksums.txt","type":"Checksum","extra":{}},
+  {"name":"gentle-ai.rb","path":"dist/homebrew/Formula/gentle-ai.rb","type":"Homebrew Formula","extra":{"BrewConfig":{"name":"gentle-ai","repository":{"owner":"Gentleman-Programming","name":"homebrew-tap","token":"{{ .Env.HOMEBREW_TAP_TOKEN }}"},"directory":"Formula"}}}
+]`
 
 func TestWindowsDistributionRestorationGateIsDocumented(t *testing.T) {
 	docs := readRepositoryFile(t, "README.md") + readRepositoryFile(t, "docs", "release-signing.md")
