@@ -24,9 +24,12 @@ Run read-only checks first:
 ```bash
 gh auth status
 REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+REPO_URL="$(gh repo view --json url -q .url)"
+HOST="${REPO_URL#*://}"
+HOST="${HOST%%/*}"
 gh repo view --json nameWithOwner,url,hasDiscussionsEnabled
 git ls-files CONTRIBUTING.md CONTRIBUTING.* .github/CONTRIBUTING.md .github/ISSUE_TEMPLATE
-gh api --paginate "repos/$REPO/labels?per_page=100" --jq '.[].name'
+gh api --hostname "$HOST" --paginate "repos/$REPO/labels?per_page=100" --jq '.[].name'
 ```
 
 Also inspect:
@@ -37,7 +40,7 @@ Also inspect:
 - issue forms, required fields, and labels declared by each template;
 - existing open and closed issues for duplicates and established wording.
 
-Stop and ask for repository context if authentication, repository resolution, or policy discovery fails. Never continue from failed discovery into issue publication.
+Stop and ask for repository context if authentication, repository resolution, verification that REPO and HOST are non-empty, or policy discovery fails. Never continue from failed discovery into issue publication.
 
 ## Workflow
 
