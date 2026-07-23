@@ -27,7 +27,7 @@ REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 REPO_URL="$(gh repo view --json url -q .url)"
 HOST="${REPO_URL#*://}"
 HOST="${HOST%%/*}"
-gh repo view --json nameWithOwner,url,hasDiscussionsEnabled
+gh repo view --json nameWithOwner,url,hasDiscussionsEnabled,hasIssuesEnabled,isBlankIssuesEnabled
 git ls-files CONTRIBUTING.md CONTRIBUTING.* .github/CONTRIBUTING.md .github/ISSUE_TEMPLATE
 gh api --hostname "$HOST" --paginate "repos/$REPO/labels?per_page=100" --jq '.[].name'
 ```
@@ -40,7 +40,9 @@ Also inspect:
 - issue forms, required fields, and labels declared by each template;
 - existing open and closed issues for duplicates and established wording.
 
-Stop and ask for repository context if authentication, repository resolution, verification that REPO and HOST are non-empty, or policy discovery fails. Never continue from failed discovery into issue publication.
+Stop and ask for repository context if authentication, repository resolution, verification that REPO and HOST are non-empty, required metadata is unavailable, hasIssuesEnabled is false, or policy discovery fails. Never continue from failed discovery into issue publication.
+
+A no-template fallback is allowed only when isBlankIssuesEnabled is explicitly true. Otherwise follow discovered contact links or stop and ask; never publish.
 
 ## Workflow
 
@@ -48,8 +50,10 @@ Stop and ask for repository context if authentication, repository resolution, ve
 2. Search open and closed issues:
 
    ```bash
-   gh issue list --repo "$REPO" --state all --search "$QUERY"
+   gh issue list --repo "$HOST/$REPO" --state all --search "$QUERY" --limit 1000
    ```
+
+   If 1000 results are returned or completeness remains uncertain, narrow the search, use read-only API discovery, or stop and ask before publishing.
 
 3. If an issue already covers the same behavior, comment there instead of creating a duplicate.
 4. Choose a repository-provided template only when its purpose matches the report.
@@ -57,19 +61,25 @@ Stop and ask for repository context if authentication, repository resolution, ve
 6. Apply labels only when they exist and repository guidance establishes who should apply them.
 7. Publish only after the title, body, target repository, and selected template or fallback have been reviewed.
 
-## Template Path
-
-When a matching template exists, use its discovered filename:
-
-```bash
-gh issue create --repo "$REPO" --template "$TEMPLATE" --title "$TITLE"
-```
+## Template Paths
 
 Do not guess a template filename. If multiple templates could apply and repository guidance does not distinguish them, stop and ask which one to use.
 
+- .yml and .yaml files are GitHub Issue Forms. Do not parse or render their schema. Open the web issue chooser and stop for human completion:
+
+  ```bash
+  gh issue create --repo "$HOST/$REPO" --web
+  ```
+
+- .md files are Markdown templates. Read the matching template, complete it from known evidence into a reviewed BODY_FILE, then publish it:
+
+  ```bash
+  gh issue create --repo "$HOST/$REPO" --title "$TITLE" --body-file "$BODY_FILE"
+  ```
+
 ## No-Template Fallback
 
-When the repository permits issue creation but provides no matching template, prepare a structured body with these sections:
+When the repository permits issue creation, provides no matching template, and isBlankIssuesEnabled is explicitly true, prepare a structured body with these sections:
 
 - problem or requested outcome;
 - reproduction or motivating example;
@@ -81,10 +91,10 @@ When the repository permits issue creation but provides no matching template, pr
 Publish the reviewed fallback explicitly:
 
 ```bash
-gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY"
+gh issue create --repo "$HOST/$REPO" --title "$TITLE" --body "$BODY"
 ```
 
-If repository configuration disables blank issues, follow its configured contact links or stop and ask. Do not bypass repository policy.
+If blank issues are not explicitly enabled, follow discovered contact links or stop and ask. Never publish a no-template fallback.
 
 ## Labels And Approval
 
