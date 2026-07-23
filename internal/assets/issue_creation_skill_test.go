@@ -65,9 +65,9 @@ func TestIssueCreationSkillDiscoversRepositoryPolicy(t *testing.T) {
 	}
 
 	publicationCommands := []string{
-		"gh issue create --repo \"$HOST/$REPO\" --web",
-		"gh issue create --repo \"$HOST/$REPO\" --title \"$TITLE\" --body-file \"$BODY_FILE\"",
-		"gh issue create --repo \"$HOST/$REPO\" --title \"$TITLE\" --body \"$BODY\"",
+		"gh issue create --repo \"$HOST/$REPO\" --web \"${LABEL_ARGS[@]}\"",
+		"gh issue create --repo \"$HOST/$REPO\" --title \"$TITLE\" --body-file \"$BODY_FILE\" \"${LABEL_ARGS[@]}\"",
+		"gh issue create --repo \"$HOST/$REPO\" --title \"$TITLE\" --body \"$BODY\" \"${LABEL_ARGS[@]}\"",
 	}
 	requiredDiscoverySteps := []string{
 		"gh auth status",
@@ -90,13 +90,12 @@ func TestIssueCreationSkillDiscoversRepositoryPolicy(t *testing.T) {
 		"LABEL_ARGS+=(--label \"$LABEL\")",
 		"only labels that exist and repository policy permits the actor to apply",
 	}
-	const labelArgsExpansion = "\"${LABEL_ARGS[@]}\""
-	if count := strings.Count(content, labelArgsExpansion); count != 3 {
-		t.Errorf("consumer issue-creation skill must use %q exactly 3 times, got %d", labelArgsExpansion, count)
-	}
-
 	for _, issueCreationCommand := range publicationCommands {
 		commandIndex := strings.Index(content, issueCreationCommand)
+		if commandIndex == -1 {
+			t.Errorf("consumer issue-creation skill missing publication command %q", issueCreationCommand)
+			continue
+		}
 		if guardIndex >= commandIndex {
 			t.Errorf("consumer issue-creation skill must place failed-discovery guard before %q", issueCreationCommand)
 		}
