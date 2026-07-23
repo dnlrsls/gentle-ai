@@ -44,6 +44,16 @@ Stop and ask for repository context if authentication, repository resolution, ve
 
 A no-template fallback is allowed only when isBlankIssuesEnabled is explicitly true. Otherwise follow discovered contact links or stop and ask; never publish.
 
+After discovery and review, build optional label arguments using only labels that exist and repository policy permits the actor to apply:
+
+```bash
+LABEL_ARGS=()
+# Repeat for each reviewed, permitted discovered label.
+LABEL_ARGS+=(--label "$LABEL")
+```
+
+An empty array applies no label; do not invent labels.
+
 ## Workflow
 
 1. Describe the problem or request in one sentence and derive a short search query.
@@ -68,13 +78,13 @@ Do not guess a template filename. If multiple templates could apply and reposito
 - .yml and .yaml files are GitHub Issue Forms. Do not parse or render their schema. Open the web issue chooser and stop for human completion:
 
   ```bash
-  gh issue create --repo "$HOST/$REPO" --web
+  gh issue create --repo "$HOST/$REPO" --web "${LABEL_ARGS[@]}"
   ```
 
 - .md files are Markdown templates. Read the matching template, complete it from known evidence into a reviewed BODY_FILE, then publish it:
 
   ```bash
-  gh issue create --repo "$HOST/$REPO" --title "$TITLE" --body-file "$BODY_FILE"
+  gh issue create --repo "$HOST/$REPO" --title "$TITLE" --body-file "$BODY_FILE" "${LABEL_ARGS[@]}"
   ```
 
 ## No-Template Fallback
@@ -91,7 +101,7 @@ When the repository permits issue creation, provides no matching template, and i
 Publish the reviewed fallback explicitly:
 
 ```bash
-gh issue create --repo "$HOST/$REPO" --title "$TITLE" --body "$BODY"
+gh issue create --repo "$HOST/$REPO" --title "$TITLE" --body "$BODY" "${LABEL_ARGS[@]}"
 ```
 
 If blank issues are not explicitly enabled, follow discovered contact links or stop and ask. Never publish a no-template fallback.

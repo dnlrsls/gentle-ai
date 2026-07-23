@@ -46,6 +46,9 @@ func TestIssueCreationSkillDiscoversRepositoryPolicy(t *testing.T) {
 		"gh issue create --repo \"$HOST/$REPO\" --title \"$TITLE\" --body-file \"$BODY_FILE\"",
 		"isBlankIssuesEnabled is explicitly true",
 		"gh issue create --repo \"$HOST/$REPO\" --title \"$TITLE\" --body \"$BODY\"",
+		"LABEL_ARGS=()",
+		"LABEL_ARGS+=(--label \"$LABEL\")",
+		"only labels that exist and repository policy permits the actor to apply",
 		"follow discovered contact links or stop and ask",
 		"Never publish a no-template fallback.",
 		"Stop and ask",
@@ -83,6 +86,13 @@ func TestIssueCreationSkillDiscoversRepositoryPolicy(t *testing.T) {
 		"gh issue list --repo \"$HOST/$REPO\" --state all --search \"$QUERY\" --limit 1000",
 		"If 1000 results are returned or completeness remains uncertain, narrow the search, use read-only API discovery, or stop and ask before publishing.",
 		"isBlankIssuesEnabled is explicitly true",
+		"LABEL_ARGS=()",
+		"LABEL_ARGS+=(--label \"$LABEL\")",
+		"only labels that exist and repository policy permits the actor to apply",
+	}
+	const labelArgsExpansion = "\"${LABEL_ARGS[@]}\""
+	if count := strings.Count(content, labelArgsExpansion); count != 3 {
+		t.Errorf("consumer issue-creation skill must use %q exactly 3 times, got %d", labelArgsExpansion, count)
 	}
 
 	for _, issueCreationCommand := range publicationCommands {
