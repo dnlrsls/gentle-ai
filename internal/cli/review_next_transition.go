@@ -281,6 +281,20 @@ func (target reviewTransitionTarget) validateArguments() []ReviewTransitionArgum
 	return []ReviewTransitionArgument{{Name: "base-ref", Value: target.BaseRef}}
 }
 
+func (target reviewTransitionTarget) recoveryArguments() ([]ReviewTransitionArgument, bool) {
+	if target.Kind != reviewtransaction.TargetBaseDiff {
+		return nil, true
+	}
+	if strings.TrimSpace(target.BaseRef) == "" || !target.RecoveryScopeChanged {
+		return nil, false
+	}
+	return []ReviewTransitionArgument{
+		{Name: "base-ref", Value: target.BaseRef},
+		{Name: "committed-only", Value: "true"},
+		{Name: "projection", Value: string(target.Projection)},
+	}, true
+}
+
 func reviewStartArguments(status ReviewTargetStatusResult, lineage string) []ReviewTransitionArgument {
 	arguments := []ReviewTransitionArgument{
 		{Name: "contract", Value: ReviewIntegrationContractV1},
@@ -357,7 +371,13 @@ func reviewRecoveryCollection(status ReviewTargetStatusResult, binding ReviewTra
 		disposition = reviewtransaction.RecoveryInvalidated
 	}
 	if input.recoveryAuthorized(binding) {
-		return reviewExecuteTransition("recovery_authorized", "review.recover", []ReviewTransitionArgument{{Name: "predecessor-lineage", Value: binding.LineageID}, {Name: "expected-predecessor-revision", Value: binding.Revision}, {Name: "successor-lineage", Value: input.Successor}, {Name: "disposition", Value: string(disposition)}, {Name: "reason", Value: input.Reason}, {Name: "actor", Value: input.Actor}, {Name: "maintainer-authorization", Value: input.Authorization}}, []ReviewTransitionArgument{{Name: "state", Value: string(status.Authority.State)}, {Name: "recovery_authorization", Value: "provided"}}, binding, nil)
+		targetArguments, ok := input.Target.recoveryArguments()
+		if !ok {
+			return reviewStopTransition("recovery_target_unchanged")
+		}
+		arguments := []ReviewTransitionArgument{{Name: "predecessor-lineage", Value: binding.LineageID}, {Name: "expected-predecessor-revision", Value: binding.Revision}, {Name: "successor-lineage", Value: input.Successor}, {Name: "disposition", Value: string(disposition)}, {Name: "reason", Value: input.Reason}, {Name: "actor", Value: input.Actor}, {Name: "maintainer-authorization", Value: input.Authorization}}
+		arguments = append(arguments, targetArguments...)
+		return reviewExecuteTransition("recovery_authorized", "review.recover", arguments, []ReviewTransitionArgument{{Name: "state", Value: string(status.Authority.State)}, {Name: "recovery_authorization", Value: "provided"}}, binding, nil)
 	}
 	return reviewCollectTransition("recovery_authorization_required", ReviewTransitionInput{
 		Name: "recovery_authorization", Schema: "gentle-ai.review-recovery-authorization/v1", CaptureOperation: "external.authorize_recovery",

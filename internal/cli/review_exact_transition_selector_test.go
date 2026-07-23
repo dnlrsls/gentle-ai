@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -70,5 +71,197 @@ func TestNegotiatedValidateTransitionPreservesExactBaseRef(t *testing.T) {
 	}
 	if err := RunReview(validateArgs, io.Discard); err != nil {
 		t.Fatalf("execute emitted validate transition: %v", err)
+	}
+}
+
+func TestNegotiatedRecoverTransitionPreservesExactBaseDiffSelectors(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	runReviewCLIGit(t, repo, "branch", "review-base")
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runReviewCLIGit(t, repo, "add", "tracked.txt")
+	runReviewCLIGit(t, repo, "commit", "-qm", "candidate")
+
+	var startedOutput bytes.Buffer
+	if err := RunReviewFacadeStart([]string{"--cwd", repo, "--base-ref", "review-base", "--committed-only"}, &startedOutput); err != nil {
+		t.Fatal(err)
+	}
+	var started ReviewFacadeStartResult
+	if err := json.Unmarshal(startedOutput.Bytes(), &started); err != nil {
+		t.Fatal(err)
+	}
+	predecessorStore, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, started.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err := predecessorStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RunReviewInvalidate([]string{"--cwd", repo, "--lineage", started.LineageID, "--expected-revision", predecessor.Revision, "--reason", "candidate invalidated"}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err = predecessorStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	status := func(args ...string) ReviewTargetStatusResult {
+		t.Helper()
+		var output bytes.Buffer
+		if err := RunReview(append([]string{"status", "--contract", ReviewIntegrationContractV1, "--base-ref", "review-base", "--cwd", repo, "--lineage", started.LineageID}, args...), &output); err != nil {
+			t.Fatal(err)
+		}
+		var result ReviewTargetStatusResult
+		decodeStrictReviewJSON(t, output.Bytes(), &result)
+		return result
+	}
+	authorization := func(targetIdentity, successor string) []string {
+		return []string{
+			"--next-transition", "--recovery-successor-lineage", successor,
+			"--recovery-actor", "maintainer", "--recovery-reason", "changed base-diff scope",
+			"--recovery-authorization", reviewRecoveryAuthorization(started.LineageID, predecessor.Revision, targetIdentity, "maintainer", "changed base-diff scope"),
+		}
+	}
+
+	probe := status()
+	unchanged := status(authorization(probe.TargetIdentity, "review-unchanged")...)
+	if unchanged.NextTransition == nil || unchanged.NextTransition.Kind != reviewNextTransitionStop || unchanged.NextTransition.Execute != nil || unchanged.NextTransition.Collect != nil {
+		t.Fatalf("unchanged recovery transition = %#v", unchanged.NextTransition)
+	}
+	unchangedStore, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, "review-unchanged")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(unchangedStore.Dir); !os.IsNotExist(err) {
+		t.Fatalf("unchanged successor store exists or cannot be inspected: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("changed candidate\nline two\nline three\nline four\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runReviewCLIGit(t, repo, "add", "tracked.txt")
+	runReviewCLIGit(t, repo, "commit", "-qm", "changed candidate")
+
+	var recoveryStartedOutput bytes.Buffer
+	if err := RunReviewFacadeStart([]string{"--cwd", repo, "--base-ref", "review-base", "--committed-only"}, &recoveryStartedOutput); err != nil {
+		t.Fatal(err)
+	}
+	var recoveryPredecessor ReviewFacadeStartResult
+	if err := json.Unmarshal(recoveryStartedOutput.Bytes(), &recoveryPredecessor); err != nil {
+		t.Fatal(err)
+	}
+	resultPath := filepath.Join(t.TempDir(), "blocking-result.json")
+	writeReviewCLIJSON(t, resultPath, facadeReviewerResult{Lens: recoveryPredecessor.SelectedLenses[0], Findings: []facadeFinding{{Location: "tracked.txt:1", Severity: "CRITICAL", Claim: "candidate regression", ProofRefs: []string{"tracked.txt:1 changed hunk"}, EvidenceClass: reviewtransaction.EvidenceDeterministic, CausalDisposition: reviewtransaction.CausalIntroduced}}, Evidence: []string{"candidate reviewed"}})
+	if err := RunReviewFacadeFinalize([]string{"--cwd", repo, "--lineage", recoveryPredecessor.LineageID, "--result", resultPath, "--correction-lines", "1"}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	recoveryStore, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, recoveryPredecessor.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryRecord, err := recoveryStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveryRecord.State.State != reviewtransaction.StateCorrectionRequired {
+		t.Fatalf("recovery predecessor state = %q", recoveryRecord.State.State)
+	}
+
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("corrected candidate\nline two\nline three\nline four\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	validationPath := filepath.Join(t.TempDir(), "validation.json")
+	writeReviewCLIJSON(t, validationPath, facadeValidationResult{
+		OriginalCriteria:     facadeValidationCheck{Evidence: []string{"acceptance still fails"}},
+		CorrectionRegression: facadeValidationCheck{Evidence: []string{"regression still fails"}},
+		FollowUps:            []reviewtransaction.FollowUp{},
+	})
+	if err := RunReviewFacadeFinalize([]string{"--cwd", repo, "--lineage", recoveryPredecessor.LineageID, "--validation", validationPath}, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	recoveryRecord, err = recoveryStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	forecast := 1
+	recoveryRecord.State.State, recoveryRecord.State.ProposedCorrectionLines, recoveryRecord.State.ActualCorrectionLines = reviewtransaction.StateCorrectionRequired, &forecast, nil
+	recoveryRecord.State.FixDeltaHash, recoveryRecord.State.OriginalCriteria, recoveryRecord.State.CorrectionRegression = reviewtransaction.EmptyFixDeltaHash, nil, nil
+	if err := recoveryRecord.State.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	recoveryRecord.Revision, err = reviewtransaction.CompactRevisionForState(recoveryRecord.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryRecord.Schema = "gentle-ai.review-state-record/v2"
+	payload, err := json.MarshalIndent(recoveryRecord, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recoveryStore.StatePath(), append(payload, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(recoveryStore.ReceiptPath()); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(recoveryStore.Dir, "finalize-attempt-journal.json")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	runReviewCLIGit(t, repo, "add", "tracked.txt")
+	runReviewCLIGit(t, repo, "commit", "-qm", "corrected candidate")
+
+	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("recovered candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runReviewCLIGit(t, repo, "add", "tracked.txt")
+	runReviewCLIGit(t, repo, "commit", "-qm", "recovered candidate")
+	committedTree := strings.TrimSpace(runReviewCLIGit(t, repo, "rev-parse", "HEAD^{tree}"))
+	var probeOutput bytes.Buffer
+	if err := RunReview([]string{"status", "--contract", ReviewIntegrationContractV1, "--base-ref", "review-base", "--cwd", repo, "--lineage", recoveryPredecessor.LineageID}, &probeOutput); err != nil {
+		t.Fatal(err)
+	}
+	decodeStrictReviewJSON(t, probeOutput.Bytes(), &probe)
+	var changedOutput bytes.Buffer
+	if err := RunReview([]string{
+		"status", "--contract", ReviewIntegrationContractV1, "--next-transition", "--base-ref", "review-base", "--cwd", repo, "--lineage", recoveryPredecessor.LineageID,
+		"--recovery-successor-lineage", "review-changed", "--recovery-actor", "maintainer", "--recovery-reason", "changed base-diff scope",
+		"--recovery-authorization", reviewRecoveryAuthorization(recoveryPredecessor.LineageID, recoveryRecord.Revision, probe.TargetIdentity, "maintainer", "changed base-diff scope"),
+	}, &changedOutput); err != nil {
+		t.Fatal(err)
+	}
+	var changed ReviewTargetStatusResult
+	decodeStrictReviewJSON(t, changedOutput.Bytes(), &changed)
+	if changed.NextTransition == nil || changed.NextTransition.Execute == nil || changed.NextTransition.Execute.Operation != "review.recover" {
+		t.Fatalf("changed recovery transition = %#v", changed.NextTransition)
+	}
+
+	recoverArgs := []string{"recover", "--cwd", repo}
+	found := map[string]string{}
+	for _, argument := range changed.NextTransition.Execute.Arguments {
+		found[argument.Name] = argument.Value
+		if argument.Name == "committed-only" {
+			recoverArgs = append(recoverArgs, "--"+argument.Name+"="+argument.Value)
+			continue
+		}
+		recoverArgs = append(recoverArgs, "--"+argument.Name, argument.Value)
+	}
+	if found["base-ref"] != "review-base" || found["committed-only"] != "true" || found["projection"] != string(reviewtransaction.ProjectionWorkspace) {
+		t.Fatalf("recover transition arguments = %#v", changed.NextTransition.Execute.Arguments)
+	}
+	if err := RunReview(recoverArgs, io.Discard); err != nil {
+		t.Fatalf("execute emitted recover transition: %v", err)
+	}
+	successorStore, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, "review-changed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, err := successorStore.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if successor.State.InitialSnapshot.Kind != reviewtransaction.TargetBaseDiff || successor.State.InitialSnapshot.CandidateTree != committedTree {
+		t.Fatalf("recovered committed base-diff target = %#v, want candidate tree %s", successor.State.InitialSnapshot, committedTree)
 	}
 }
