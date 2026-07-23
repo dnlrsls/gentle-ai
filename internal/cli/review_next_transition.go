@@ -104,6 +104,12 @@ func newReviewNextTransition(status ReviewTargetStatusResult, selectedLenses []s
 		bindingTarget = reviewAuthorityTargetIdentity(status)
 	}
 	binding := reviewTransitionBinding(status.Authority, bindingTarget, input.RepositoryContext)
+	if status.Authority.State == reviewtransaction.StateEscalated {
+		if status.Action == reviewtransaction.TargetStatusActionRecover {
+			return reviewRecoveryCollection(status, binding, input)
+		}
+		return reviewStopTransition("escalated_authority")
+	}
 	if status.Action == reviewtransaction.TargetStatusActionReconcileFinalize {
 		return reviewStopTransition("original_finalize_request_required")
 	}

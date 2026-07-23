@@ -361,6 +361,7 @@ func TestReviewNextTransitionStateTable(t *testing.T) {
 		{"reviewing high partial", status(reviewtransaction.TargetApplicabilityCurrent, reviewtransaction.StateReviewing, reviewtransaction.TargetStatusActionFinalize, reviewtransaction.ReplayabilityNotReplayable), []string{reviewtransaction.LensReliability}, nil, reviewNextTransitionCollect, ""},
 		{"correction required", status(reviewtransaction.TargetApplicabilityCurrent, reviewtransaction.StateCorrectionRequired, reviewtransaction.TargetStatusActionFinalize, reviewtransaction.ReplayabilityNotReplayable), nil, nil, reviewNextTransitionCollect, ""},
 		{"unchanged corrected authority", status(reviewtransaction.TargetApplicabilityCurrent, reviewtransaction.StateCorrectionRequired, reviewtransaction.TargetStatusActionStop, reviewtransaction.ReplayabilityManualActionRequired), nil, nil, reviewNextTransitionStop, ""},
+		{"other state stop", status(reviewtransaction.TargetApplicabilityCurrent, reviewtransaction.StateReviewing, reviewtransaction.TargetStatusActionStop, reviewtransaction.ReplayabilityManualActionRequired), nil, nil, reviewNextTransitionStop, ""},
 		{"validating", status(reviewtransaction.TargetApplicabilityCurrent, reviewtransaction.StateValidating, reviewtransaction.TargetStatusActionFinalize, reviewtransaction.ReplayabilityNotReplayable), nil, nil, reviewNextTransitionCollect, ""},
 		{"pending finalize journal", status(reviewtransaction.TargetApplicabilityCurrent, reviewtransaction.StateReviewing, reviewtransaction.TargetStatusActionReconcileFinalize, reviewtransaction.ReplayabilityStatusRequired), nil, nil, reviewNextTransitionStop, ""},
 		{"approved", status(reviewtransaction.TargetApplicabilityCurrent, reviewtransaction.StateApproved, reviewtransaction.TargetStatusActionValidate, reviewtransaction.ReplayabilityNotReplayable), nil, nil, reviewNextTransitionExecute, "review.validate"},
@@ -386,6 +387,14 @@ func TestReviewNextTransitionStateTable(t *testing.T) {
 			if got.Kind != tt.wantKind || got.Execute != nil && got.Execute.Operation != tt.wantOperation {
 				t.Fatalf("next transition = %#v", got)
 			}
+			wantReason := map[string]string{
+				"escalated unchanged":           "escalated_authority",
+				"unchanged corrected authority": "unchanged_or_unverified_authority",
+				"other state stop":              "native_stop_required",
+			}[tt.name]
+			if wantReason != "" && got.ReasonCode != wantReason {
+				t.Fatalf("stop reason = %q, want %q", got.ReasonCode, wantReason)
+			}
 			if err := got.Validate(); err != nil {
 				t.Fatal(err)
 			}
@@ -393,6 +402,133 @@ func TestReviewNextTransitionStateTable(t *testing.T) {
 				t.Fatalf("stop exposed a command or template: %#v", got)
 			}
 		})
+	}
+	for _, action := range []reviewtransaction.TargetStatusAction{
+		reviewtransaction.TargetStatusActionStart,
+		reviewtransaction.TargetStatusActionFinalize,
+		reviewtransaction.TargetStatusActionValidate,
+		reviewtransaction.TargetStatusActionRetryFinalVerification,
+		reviewtransaction.TargetStatusActionMaintainer,
+		reviewtransaction.TargetStatusActionSelectLineage,
+		reviewtransaction.TargetStatusActionRepairAuthority,
+		reviewtransaction.TargetStatusActionReconcileFinalize,
+		reviewtransaction.TargetStatusActionStop,
+	} {
+		t.Run("escalated non-recover "+string(action), func(t *testing.T) {
+			got := newReviewNextTransition(status(reviewtransaction.TargetApplicabilityCurrent, reviewtransaction.StateEscalated, action, reviewtransaction.ReplayabilityManualActionRequired), nil, nil, false, nil, reviewNextTransitionInput{})
+			if got.Kind != reviewNextTransitionStop || got.ReasonCode != "escalated_authority" || got.Collect != nil || got.Execute != nil {
+				t.Fatalf("escalated action %q transition = %#v", action, got)
+			}
+		})
+	}
+}
+
+func TestNegotiatedEscalatedRecoveryTransitionParity(t *testing.T) {
+	repo := initReviewCLIRepo(t)
+	legacyPath := filepath.Join(repo, "internal", "legacy", "unsafe.go")
+	candidatePath := filepath.Join(repo, "internal", "candidate", "feature.go")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(candidatePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyPath, []byte("package legacy\n\nfunc ParseLimit(value int) int { return value }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(candidatePath, []byte("package candidate\n\nfunc value() int { return 0 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runReviewCLIGit(t, repo, "add", "internal/legacy/unsafe.go", "internal/candidate/feature.go")
+	runReviewCLIGit(t, repo, "commit", "-qm", "add recovery fixture")
+	if err := os.WriteFile(candidatePath, []byte("package candidate\n\nfunc value() int { return 1 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	authority := runNegotiatedReviewStart(t, repo, "escalated-recovery-parity")
+	reviewer := filepath.Join(t.TempDir(), "escalated-result.json")
+	writeReviewCLIJSON(t, reviewer, facadeReviewerResult{Lens: authority.SelectedLenses[0], Findings: []facadeFinding{{
+		Location: "internal/legacy/unsafe.go:3", Severity: "CRITICAL", Claim: "unchanged legacy parser is unsafe",
+		ProofRefs: []string{"reproduced without candidate causality"}, EvidenceClass: reviewtransaction.EvidenceDeterministic, CausalDisposition: reviewtransaction.CausalIntroduced,
+	}}, Evidence: []string{"reproduced the legacy defect"}})
+	if err := RunReviewFacadeFinalize([]string{"--cwd", repo, "--lineage", authority.LineageID, "--result", reviewer}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := reviewtransaction.CompactAuthoritativeStore(context.Background(), repo, authority.LineageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Load()
+	if err != nil || record.State.State != reviewtransaction.StateEscalated {
+		t.Fatalf("escalated authority fixture = %#v, %v", record, err)
+	}
+	authorityRevision := record.Revision
+
+	statusArgs := func(extra ...string) []string {
+		args := []string{"status", "--contract", ReviewIntegrationContractV1, "--action-eligibility", "--next-transition", "--cwd", repo, "--lineage", authority.LineageID}
+		return append(args, extra...)
+	}
+	readStatus := func(args []string) ReviewTargetStatusResult {
+		var output bytes.Buffer
+		if err := RunReview(args, &output); err != nil {
+			t.Fatal(err)
+		}
+		var result ReviewTargetStatusResult
+		decodeStrictReviewJSON(t, output.Bytes(), &result)
+		return result
+	}
+
+	unchanged := readStatus(statusArgs())
+	if unchanged.Action != reviewtransaction.TargetStatusActionStop || unchanged.NextTransition == nil ||
+		unchanged.NextTransition.Kind != reviewNextTransitionStop || unchanged.NextTransition.ReasonCode != "escalated_authority" ||
+		unchanged.NextTransition.Collect != nil || unchanged.NextTransition.Execute != nil {
+		t.Fatalf("unchanged escalated status = %#v", unchanged)
+	}
+
+	if err := os.WriteFile(candidatePath, []byte("package candidate\n\nfunc value() int { return 2 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const successor, actor, reason = "escalated-recovery-successor", "maintainer@example.com", "recover changed target"
+	collect := readStatus(statusArgs(
+		"--recovery-successor-lineage", successor, "--recovery-actor", actor, "--recovery-reason", reason,
+	))
+	if collect.Action != reviewtransaction.TargetStatusActionRecover || collect.ActionDisposition != reviewtransaction.RecoveryEscalated ||
+		collect.Authority == nil || collect.Authority.Revision != authorityRevision ||
+		collect.AuthorityTargetIdentity == "" || collect.AuthorityTargetIdentity == collect.TargetIdentity {
+		t.Fatalf("changed escalated status = %#v", collect)
+	}
+	if collect.Eligibility == nil || len(collect.Eligibility.AllowedActions) != 1 ||
+		!reflect.DeepEqual(collect.Eligibility.AllowedActions[0], ReviewEligibleAction{
+			Action: "review.recover", ReasonCode: reviewActionEligibleEscalatedRecovery,
+			RequiredInputs: []string{"predecessor_lineage", "expected_predecessor_revision", "successor_lineage", "disposition", "reason", "actor", "maintainer_authorization"},
+			Disposition:    reviewtransaction.RecoveryEscalated,
+			Binding:        &ReviewActionBinding{LineageID: authority.LineageID, Revision: authorityRevision, TargetIdentity: collect.TargetIdentity},
+		}) {
+		t.Fatalf("escalated recovery eligibility = %#v", collect.Eligibility)
+	}
+	if collect.NextTransition == nil || collect.NextTransition.Kind != reviewNextTransitionCollect ||
+		collect.NextTransition.ReasonCode != "recovery_authorization_required" || collect.NextTransition.Collect == nil ||
+		!reflect.DeepEqual(collect.NextTransition.Collect.Inputs, []ReviewTransitionInput{{
+			Name: "recovery_authorization", Schema: "gentle-ai.review-recovery-authorization/v1", CaptureOperation: "external.authorize_recovery",
+			Arguments: []ReviewTransitionArgument{{Name: "lineage", Value: authority.LineageID}, {Name: "expected-revision", Value: authorityRevision}, {Name: "target", Value: collect.TargetIdentity}, {Name: "disposition", Value: string(reviewtransaction.RecoveryEscalated)}},
+		}}) {
+		t.Fatalf("missing authorization transition = %#v", collect.NextTransition)
+	}
+
+	authorization := "gentle-ai.review-recovery-authorization/v1\npredecessor_lineage=" + authority.LineageID +
+		"\npredecessor_revision=" + authorityRevision + "\ntarget_identity=" + collect.TargetIdentity +
+		"\nactor=" + actor + "\nreason=" + reason
+	execute := readStatus(statusArgs(
+		"--recovery-successor-lineage", successor, "--recovery-actor", actor, "--recovery-reason", reason, "--recovery-authorization", authorization,
+	))
+	if execute.NextTransition == nil || execute.NextTransition.Kind != reviewNextTransitionExecute ||
+		execute.NextTransition.ReasonCode != "recovery_authorized" || execute.NextTransition.Execute == nil ||
+		!reflect.DeepEqual(execute.NextTransition.Execute, &ReviewTransitionExecution{
+			Operation:     "review.recover",
+			Arguments:     []ReviewTransitionArgument{{Name: "predecessor-lineage", Value: authority.LineageID}, {Name: "expected-predecessor-revision", Value: authorityRevision}, {Name: "successor-lineage", Value: successor}, {Name: "disposition", Value: string(reviewtransaction.RecoveryEscalated)}, {Name: "reason", Value: reason}, {Name: "actor", Value: actor}, {Name: "maintainer-authorization", Value: authorization}},
+			Preconditions: []ReviewTransitionArgument{{Name: "state", Value: string(reviewtransaction.StateEscalated)}, {Name: "recovery_authorization", Value: "provided"}},
+			Binding:       ReviewTransitionBinding{LineageID: authority.LineageID, Revision: authorityRevision, TargetIdentity: collect.TargetIdentity},
+		}) {
+		t.Fatalf("exact authorization transition = %#v", execute.NextTransition)
 	}
 }
 
