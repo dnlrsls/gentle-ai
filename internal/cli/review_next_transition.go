@@ -282,17 +282,21 @@ func (target reviewTransitionTarget) validateArguments() []ReviewTransitionArgum
 }
 
 func (target reviewTransitionTarget) recoveryArguments() ([]ReviewTransitionArgument, bool) {
-	if target.Kind != reviewtransaction.TargetBaseDiff {
+	switch target.Kind {
+	case reviewtransaction.TargetCurrentChanges:
 		return nil, true
-	}
-	if strings.TrimSpace(target.BaseRef) == "" || !target.RecoveryScopeChanged {
+	case reviewtransaction.TargetBaseDiff:
+		if strings.TrimSpace(target.BaseRef) == "" || !target.RecoveryScopeChanged {
+			return nil, false
+		}
+		return []ReviewTransitionArgument{
+			{Name: "base-ref", Value: target.BaseRef},
+			{Name: "committed-only", Value: "true"},
+			{Name: "projection", Value: string(target.Projection)},
+		}, true
+	default:
 		return nil, false
 	}
-	return []ReviewTransitionArgument{
-		{Name: "base-ref", Value: target.BaseRef},
-		{Name: "committed-only", Value: "true"},
-		{Name: "projection", Value: string(target.Projection)},
-	}, true
 }
 
 func reviewStartArguments(status ReviewTargetStatusResult, lineage string) []ReviewTransitionArgument {

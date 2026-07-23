@@ -241,11 +241,7 @@ func TestNegotiatedRecoverTransitionPreservesExactBaseDiffSelectors(t *testing.T
 	found := map[string]string{}
 	for _, argument := range changed.NextTransition.Execute.Arguments {
 		found[argument.Name] = argument.Value
-		if argument.Name == "committed-only" {
-			recoverArgs = append(recoverArgs, "--"+argument.Name+"="+argument.Value)
-			continue
-		}
-		recoverArgs = append(recoverArgs, "--"+argument.Name, argument.Value)
+		recoverArgs = append(recoverArgs, "--"+argument.Name+"="+argument.Value)
 	}
 	if found["base-ref"] != "review-base" || found["committed-only"] != "true" || found["projection"] != string(reviewtransaction.ProjectionWorkspace) {
 		t.Fatalf("recover transition arguments = %#v", changed.NextTransition.Execute.Arguments)

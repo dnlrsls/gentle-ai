@@ -379,7 +379,7 @@ func TestReviewNextTransitionStateTable(t *testing.T) {
 				tt.status.Receipt.Status = ReviewReceiptPresent
 			}
 			if tt.status.Action == reviewtransaction.TargetStatusActionRecover {
-				input = reviewNextTransitionInput{Successor: "review-next-successor", Reason: "authorized recovery", Actor: "maintainer"}
+				input = reviewNextTransitionInput{Successor: "review-next-successor", Reason: "authorized recovery", Actor: "maintainer", Target: reviewTransitionTarget{Kind: reviewtransaction.TargetCurrentChanges}}
 				input.Authorization = "gentle-ai.review-recovery-authorization/v1\npredecessor_lineage=" + tt.status.Authority.LineageID + "\npredecessor_revision=" + tt.status.Authority.Revision + "\ntarget_identity=" + tt.status.TargetIdentity + "\nactor=" + input.Actor + "\nreason=" + input.Reason
 			}
 			got := newReviewNextTransition(tt.status, tt.lenses, tt.artifacts, false, nil, input)
@@ -393,6 +393,21 @@ func TestReviewNextTransitionStateTable(t *testing.T) {
 				t.Fatalf("stop exposed a command or template: %#v", got)
 			}
 		})
+	}
+}
+
+func TestReviewRecoveryTransitionStopsForUnsupportedTarget(t *testing.T) {
+	status := ReviewTargetStatusResult{
+		Applicability: reviewtransaction.TargetApplicabilityCurrent, Action: reviewtransaction.TargetStatusActionRecover,
+		TargetIdentity: "sha256:" + strings.Repeat("b", 64),
+		Authority:      &ReviewTargetStatusAuthority{LineageID: "review-overlay", Revision: "sha256:" + strings.Repeat("a", 64), State: reviewtransaction.StateInvalidated},
+	}
+	input := reviewNextTransitionInput{Successor: "review-overlay-successor", Reason: "authorized recovery", Actor: "maintainer", Target: reviewTransitionTarget{Kind: reviewtransaction.TargetBaseWorkspaceOverlay}}
+	input.Authorization = "gentle-ai.review-recovery-authorization/v1\npredecessor_lineage=" + status.Authority.LineageID + "\npredecessor_revision=" + status.Authority.Revision + "\ntarget_identity=" + status.TargetIdentity + "\nactor=" + input.Actor + "\nreason=" + input.Reason
+
+	got := newReviewNextTransition(status, nil, nil, false, nil, input)
+	if got.Kind != reviewNextTransitionStop || got.Execute != nil || got.Collect != nil {
+		t.Fatalf("unsupported recovery transition = %#v", got)
 	}
 }
 
