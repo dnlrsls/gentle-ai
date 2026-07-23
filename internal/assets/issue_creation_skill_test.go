@@ -91,7 +91,10 @@ func TestIssueCreationSkillDiscoversRepositoryPolicy(t *testing.T) {
 			t.Errorf("consumer issue-creation skill must place failed-discovery guard before %q", issueCreationCommand)
 		}
 		for _, discoveryStep := range requiredDiscoverySteps {
-			if strings.Index(content, discoveryStep) >= commandIndex {
+			discoveryStepIndex := strings.Index(content, discoveryStep)
+			if discoveryStepIndex == -1 {
+				t.Errorf("consumer issue-creation skill missing discovery step %q before %q", discoveryStep, issueCreationCommand)
+			} else if discoveryStepIndex >= commandIndex {
 				t.Errorf("consumer issue-creation skill must place discovery step %q before %q", discoveryStep, issueCreationCommand)
 			}
 		}
