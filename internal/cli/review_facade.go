@@ -573,6 +573,9 @@ func RunReviewRecover(args []string, stdout io.Writer) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected review recover argument %q", flags.Arg(0))
 	}
+	if err := rejectRepeatedReviewSelectors(args, "review.recover", "base-ref", "committed-only", "projection"); err != nil {
+		return err
+	}
 	if strings.TrimSpace(*predecessor) == "" || strings.TrimSpace(*expected) == "" || strings.TrimSpace(*successor) == "" || strings.TrimSpace(*reason) == "" || strings.TrimSpace(*actor) == "" || strings.TrimSpace(*disposition) == "" {
 		return errors.New("review recover requires --predecessor-lineage, --expected-predecessor-revision, --successor-lineage, --disposition, --reason, and --actor")
 	}
@@ -1037,7 +1040,7 @@ func runReviewFacadeStart(ctx context.Context, args []string, stdout io.Writer) 
 }
 
 func validateReviewStartBinding(args []string, negotiated bool, target, projection, baseRef, lineage string, committedOnly, workspaceOverlay bool) error {
-	counts := reviewStartBindingFlagCounts(args)
+	counts := reviewBindingFlagCounts(args, "review.start")
 	if !negotiated {
 		if counts["target"] != 0 {
 			return errors.New("review start --target requires --contract")
@@ -1079,9 +1082,9 @@ func validateReviewStartBinding(args []string, negotiated bool, target, projecti
 	return nil
 }
 
-func reviewStartBindingFlagCounts(args []string) map[string]int {
+func reviewBindingFlagCounts(args []string, operation string) map[string]int {
 	counts := make(map[string]int)
-	shape := reviewIntegrationOperationFlagShape("review.start")
+	shape := reviewIntegrationOperationFlagShape(operation)
 	for index := 0; index < len(args); index++ {
 		argument := args[index]
 		if argument == "--" || argument == "" || argument == "-" || argument[0] != '-' {
@@ -1094,7 +1097,14 @@ func reviewStartBindingFlagCounts(args []string) map[string]int {
 		}
 		kind, known := shape[name]
 		if !known {
-			continue
+			switch name {
+			case "projection", "base-ref":
+				kind, known = reviewIntegrationValueFlag, true
+			case "committed-only":
+				kind, known = reviewIntegrationBoolFlag, true
+			default:
+				continue
+			}
 		}
 		switch name {
 		case "contract", "target", "projection", "lineage", "base-ref", "committed-only", "workspace-overlay":
@@ -1105,6 +1115,16 @@ func reviewStartBindingFlagCounts(args []string) map[string]int {
 		}
 	}
 	return counts
+}
+
+func rejectRepeatedReviewSelectors(args []string, operation string, selectors ...string) error {
+	counts := reviewBindingFlagCounts(args, operation)
+	for _, selector := range selectors {
+		if counts[selector] > 1 {
+			return fmt.Errorf("%s repeats --%s", operation, selector)
+		}
+	}
+	return nil
 }
 
 func reviewFacadeStartResultFor(action reviewtransaction.CompactStartAction, lensesRequired bool, authority reviewtransaction.CompactState) ReviewFacadeStartResult {
@@ -1701,6 +1721,9 @@ func runReviewFacadeValidate(ctx context.Context, args []string, stdout io.Write
 	}
 	if flags.NArg() != 0 {
 		return reviewPreflightError(fmt.Errorf("unexpected review validate argument %q", flags.Arg(0)))
+	}
+	if err := rejectRepeatedReviewSelectors(args, "review.validate", "base-ref"); err != nil {
+		return err
 	}
 	negotiated, err := reviewIntegrationNegotiation(flags, *contract)
 	if err != nil {

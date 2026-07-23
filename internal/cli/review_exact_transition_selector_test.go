@@ -265,3 +265,31 @@ func TestNegotiatedRecoverTransitionPreservesExactBaseDiffSelectors(t *testing.T
 		t.Fatalf("recovered committed base-diff target = %#v, want candidate tree %s", successor.State.InitialSnapshot, committedTree)
 	}
 }
+
+func TestTransitionConsumersRejectDuplicateSelectors(t *testing.T) {
+	recoveryBindings := []string{
+		"--predecessor-lineage=review-duplicate-predecessor",
+		"--expected-predecessor-revision=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"--successor-lineage=review-duplicate-successor", "--disposition=invalidated",
+		"--reason=duplicate selector probe", "--actor=maintainer",
+	}
+	tests := []struct {
+		name string
+		run  func([]string, io.Writer) error
+		args []string
+		want string
+	}{
+		{"validate base-ref", RunReviewFacadeValidate, []string{"--cwd=/missing", "--gate=pre-pr", "--base-ref=HEAD", "-base-ref=HEAD^"}, "review.validate repeats --base-ref"},
+		{"recover base-ref", RunReviewRecover, append(recoveryBindings, "--cwd=/missing", "--base-ref=HEAD", "-base-ref=HEAD^", "--committed-only"), "review.recover repeats --base-ref"},
+		{"recover committed-only", RunReviewRecover, append(recoveryBindings, "--cwd=/missing", "--base-ref=HEAD", "--committed-only=true", "-committed-only=false"), "review.recover repeats --committed-only"},
+		{"recover projection", RunReviewRecover, append(recoveryBindings, "--cwd=/missing", "--projection=workspace", "-projection=staged"), "review.recover repeats --projection"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run(tt.args, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
