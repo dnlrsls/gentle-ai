@@ -26,7 +26,7 @@ gh auth status
 REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 gh repo view --json nameWithOwner,url,hasDiscussionsEnabled
 git ls-files CONTRIBUTING.md CONTRIBUTING.* .github/CONTRIBUTING.md .github/ISSUE_TEMPLATE
-gh label list --repo "$REPO" --limit 100
+gh api --paginate "repos/$REPO/labels?per_page=100" --jq '.[].name'
 ```
 
 Also inspect:

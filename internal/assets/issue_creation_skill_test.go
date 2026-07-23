@@ -28,7 +28,7 @@ func TestIssueCreationSkillDiscoversRepositoryPolicy(t *testing.T) {
 		"gh auth status",
 		"gh repo view --json nameWithOwner,url,hasDiscussionsEnabled",
 		".github/ISSUE_TEMPLATE",
-		"gh label list --repo \"$REPO\"",
+		"gh api --paginate \"repos/$REPO/labels?per_page=100\" --jq '.[].name'",
 		"gh issue list --repo \"$REPO\" --state all",
 		"gh issue create --repo \"$REPO\" --template \"$TEMPLATE\"",
 		"gh issue create --repo \"$REPO\" --title \"$TITLE\" --body \"$BODY\"",
@@ -36,6 +36,22 @@ func TestIssueCreationSkillDiscoversRepositoryPolicy(t *testing.T) {
 	} {
 		if !strings.Contains(content, required) {
 			t.Errorf("consumer issue-creation skill missing repository discovery or fallback %q", required)
+		}
+	}
+
+	failedDiscoveryGuard := "Never continue from failed discovery into issue publication."
+	guardIndex := strings.Index(content, failedDiscoveryGuard)
+	if guardIndex == -1 {
+		t.Errorf("consumer issue-creation skill missing failed-discovery guard %q", failedDiscoveryGuard)
+	}
+
+	for _, issueCreationCommand := range []string{
+		"gh issue create --repo \"$REPO\" --template \"$TEMPLATE\"",
+		"gh issue create --repo \"$REPO\" --title \"$TITLE\" --body \"$BODY\"",
+	} {
+		commandIndex := strings.Index(content, issueCreationCommand)
+		if guardIndex >= commandIndex {
+			t.Errorf("consumer issue-creation skill must place failed-discovery guard before %q", issueCreationCommand)
 		}
 	}
 }
