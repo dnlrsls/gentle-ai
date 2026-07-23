@@ -68,9 +68,20 @@ func TestIssueCreationSkillDiscoversRepositoryPolicy(t *testing.T) {
 	}
 	requiredDiscoverySteps := []string{
 		"gh auth status",
+		"REPO=\"$(gh repo view --json nameWithOwner -q .nameWithOwner)\"",
+		"REPO_URL=\"$(gh repo view --json url -q .url)\"",
+		"HOST=\"${REPO_URL#*://}\"",
+		"HOST=\"${HOST%%/*}\"",
 		"gh repo view --json nameWithOwner,url,hasDiscussionsEnabled,hasIssuesEnabled,isBlankIssuesEnabled",
+		"git ls-files CONTRIBUTING.md CONTRIBUTING.* .github/CONTRIBUTING.md .github/ISSUE_TEMPLATE",
 		"gh api --hostname \"$HOST\" --paginate \"repos/$REPO/labels?per_page=100\" --jq '.[].name'",
+		".github/ISSUE_TEMPLATE/config.yml",
+		"issue forms, required fields, and labels declared by each template",
+		"REPO and HOST are non-empty",
+		"required metadata is unavailable",
+		"hasIssuesEnabled is false",
 		"gh issue list --repo \"$HOST/$REPO\" --state all --search \"$QUERY\" --limit 1000",
+		"If 1000 results are returned or completeness remains uncertain, narrow the search, use read-only API discovery, or stop and ask before publishing.",
 		"isBlankIssuesEnabled is explicitly true",
 	}
 
