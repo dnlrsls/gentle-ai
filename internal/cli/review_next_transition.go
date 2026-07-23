@@ -162,7 +162,9 @@ func newReviewNextTransition(status ReviewTargetStatusResult, selectedLenses []s
 		return reviewRecoveryCollection(status, binding, input)
 	case reviewtransaction.StateApproved:
 		if status.Receipt.Status == ReviewReceiptPresent {
-			return reviewExecuteTransition("approved_receipt_ready", "review.validate", []ReviewTransitionArgument{{Name: "lineage", Value: binding.LineageID}, {Name: "gate", Value: string(input.gate())}}, []ReviewTransitionArgument{{Name: "state", Value: "approved"}, {Name: "receipt", Value: "present"}}, binding, nil)
+			arguments := []ReviewTransitionArgument{{Name: "lineage", Value: binding.LineageID}, {Name: "gate", Value: string(input.gate())}}
+			arguments = append(arguments, input.Target.validateArguments()...)
+			return reviewExecuteTransition("approved_receipt_ready", "review.validate", arguments, []ReviewTransitionArgument{{Name: "state", Value: "approved"}, {Name: "receipt", Value: "present"}}, binding, nil)
 		}
 		if status.Replayability == reviewtransaction.ReplayabilityExactReplaySafe {
 			return reviewExecuteTransition("exact_receipt_replay", "review.finalize", []ReviewTransitionArgument{{Name: "lineage", Value: binding.LineageID}}, []ReviewTransitionArgument{{Name: "state", Value: "approved"}, {Name: "receipt", Value: "publication_pending"}}, binding, nil)
@@ -259,9 +261,24 @@ type reviewNextTransitionInput struct {
 	RepairActor, RepairReason, RepairAuthorization string
 	StartLineage                                   string
 	RepositoryContext                              string
+	Target                                         reviewTransitionTarget
 	ValidationRequest                              *reviewtransaction.TargetedValidationRequest
 	CorrectionForecasted                           bool
 	CaptureContext                                 *reviewCaptureContext
+}
+
+type reviewTransitionTarget struct {
+	Kind                 reviewtransaction.TargetKind
+	Projection           reviewtransaction.Projection
+	BaseRef              string
+	RecoveryScopeChanged bool
+}
+
+func (target reviewTransitionTarget) validateArguments() []ReviewTransitionArgument {
+	if target.BaseRef == "" {
+		return nil
+	}
+	return []ReviewTransitionArgument{{Name: "base-ref", Value: target.BaseRef}}
 }
 
 func reviewStartArguments(status ReviewTargetStatusResult, lineage string) []ReviewTransitionArgument {
