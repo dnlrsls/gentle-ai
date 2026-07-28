@@ -89,6 +89,10 @@ SDD is the structured planning layer for substantial changes.
 - `hybrid` -> both backends; cross-session recovery + local files; more tokens per operation
 - `none` -> return results inline only; recommend enabling engram or openspec
 
+### OpenSpec Archive Isolation
+
+For OpenSpec or hybrid SDD work, read and follow the `Archive Isolation` section of `skills/_shared/openspec-convention.md` before inline validation, artifact readback, or broad repository reads. Exclude `openspec/changes/archive/` from those operations unless delegating or executing `sdd-archive`, or the user explicitly requests historical work.
+
 ### Commands
 
 Skills (appear in autocomplete):

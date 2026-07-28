@@ -41,6 +41,8 @@ From the orchestrator:
 
 ### Phase 1: Welcome and Codebase Analysis
 
+For OpenSpec or hybrid work, read and follow the `Archive Isolation` section of `skills/_shared/openspec-convention.md` before scanning the codebase. Exclude `openspec/changes/archive/` from the scan unless this is the archive phase or the user explicitly requests historical work.
+
 Greet the user and explain what's about to happen:
 
 ```

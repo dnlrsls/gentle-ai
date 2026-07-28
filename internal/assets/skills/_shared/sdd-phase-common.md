@@ -68,6 +68,10 @@ Do BOTH: write the file to the filesystem AND call `mem_save` as above.
 
 Return result inline only. Do not write any files or call `mem_save`.
 
+### OpenSpec Archive Isolation
+
+For OpenSpec or hybrid work, read and follow the `Archive Isolation` section of `skills/_shared/openspec-convention.md` before retrieving artifacts or scanning the repository. This applies to every normal phase; `sdd-archive` is the explicit exception.
+
 ## D. Return Envelope
 
 > **CRITICAL — Response ordering**: Your FINAL output MUST be text (the return envelope), NOT a tool call. If you need to save to Engram (`mem_save`), do it BEFORE your final text response. Do NOT call `mem_session_summary` — that's for top-level agents only. **Why**: When a sub-agent's last action is a tool call, the parent agent receives only the tool result — your text response (the actual analysis) is lost.
