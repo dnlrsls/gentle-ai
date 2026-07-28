@@ -46,3 +46,10 @@ For each task:
 5. Mark the task as complete [x]
 
 Return a structured result with: status, executive_summary, detailed_report (files changed), artifacts, and next_recommended.
+
+POST-APPLY REVIEW ROUTING:
+Return control to the parent orchestrator. If native status reports `nextRecommended: review`, the parent—not the apply executor—runs `gentle-ai review start --cwd <repo>`. The facade derives repository scope, lineage, tier, lenses, and correction budget from live Git.
+
+{{GENTLE_AI_AUTHORITY_FIRST_TERMINAL_PROCEDURE}}
+
+Reuse a valid receipt; never auto-launch Judgment Day or create another budget at commit/push/PR/release.

@@ -1,97 +1,38 @@
-# Review Ledger Contract (shared across the 4R review lenses and judgment-day)
+# Native Bounded Review Orchestration
 
-Canonical source of truth for the exhaustive first-pass loop, the persisted
-findings ledger, the artifact-store persistence branches, and the scoped
-re-review/re-judge contract. Every review-* subagent asset, every jd-*
-subagent asset, every orchestrator's inline-lens "Review Execution Contract"
-section, and the judgment-day skill docs hand-copy the clauses below verbatim
-so a single table-driven test (`internal/components/sdd/review_ledger_contract_test.go`)
-can assert they stay in sync across all 13 adapter variants and both
-execution modes.
+Parent orchestrator and native CLI only. Never pass this contract to a reviewer, refuter, judge, correction actor, or validator. Those roles receive only scope, candidate-causal admission, severity, evidence requirements, and output shape.
 
-Why this exists: the 4R lenses (review-risk / R1, review-readability / R2,
-review-reliability / R3, review-resilience / R4) and judgment-day previously
-ran a single-pass read with no memory across rounds — each pass sampled a
-different subset of real issues, and re-review surfaced old issues as if new.
-Iterating never converged. This contract replaces that with a bounded
-exhaustive first pass, a persisted ledger, and a re-review scoped to the
-ledger plus the fix diff.
+## Route
 
-## Canonical block (hand-copy verbatim into every adopting asset)
+Call `gentle-ai review start` once. The native facade discovers the repository root and untracked scope, derives the immutable target, selects zero lenses for low risk, one focus lens for standard risk, or canonical 4R for high risk, and freezes the original line count, tier, and correction budget `min(200, ceil(original_changed_lines / 2))`. Goldens stay in snapshot identity but not that count. Correction and compatible base advance never recalculate risk or open review.
 
-**Exhaustive first pass.** Loop until dry: sweep the diff repeatedly until N consecutive sweeps yield zero new findings, then stop; the loop MUST be finite. Default N = 2 consecutive dry sweeps. R2 Readability MAY use N = 1. Hard ceiling: 4 sweeps regardless of N.
+A session that can relay a blocking question declares `--consent relay` on the negotiated START; a non-low tier then answers with the typed `gentle-ai.review-integration.consent/v1` envelope instead of proceeding. That envelope is a Lossless Blocking Prompt under the orchestrator contract: relay its complete choice envelope — headline, reason, risk evidence, both choices, and the documented off path — then run exactly the one named follow-up invocation for the human's answer, never answering on their behalf. A decline is scoped to that one candidate and is not the kill switch.
 
-**Findings ledger.** Emit a findings ledger with this schema for every entry:
+A canonical four-lens selection is long work: before the first lens runs, give the one cost/side-effect forecast — four reviewer model runs over the frozen candidate, the frozen correction budget, and the at-most-one bounded correction it implies — once per candidate, never per lens.
 
-| Field | Values |
-|-------|--------|
-| `id` | `{LENS}-{NNN}` (e.g. `R1-001`) |
-| `lens` | risk \| readability \| reliability \| resilience \| judgment-day |
-| `location` | `path/to/file.ext:line` or `:start-end` |
-| `severity` | BLOCKER \| CRITICAL \| WARNING \| SUGGESTION |
-| `status` | open \| fixed \| verified \| wont-fix \| info |
-| `evidence` | why it matters |
+Run each selected lens once in the foreground, prefixed with `GENTLE_AI_REVIEW_BINDING` assembled from this exact START response as one JSON object: `lineage` from `lineage_id`, `target` from `target_identity`, `lens`/`order` from `lens_bindings`. Return one JSON object echoing `subject_hash`; require `inspection.status: "completed"`, all manifest paths in order as `inspection.paths`, `findings`/`evidence`, and severe `evidence_class`/`causal_disposition`; access failure is not completion. `gentle-ai review capture-result` follows the native transition; handles are cwd-independent and legacy bindings need `--cwd`. Pass manifests in lens order with repeated `--result-artifact-file <path>` arguments, BOM-less UTF-8 on Windows PowerShell 5.1. The POSIX inline `--result-artifact '<manifest-json>'` form remains compatible; so does provider-owned `--captured-results`; never pass raw `--result`. Native Go validates, canonicalizes, persists, hashes, reopens, and binds results; models never construct canonical bytes or hashes. Freeze merged findings. Only `introduced`, `behavior-activated`, or `worsened` with changed-hunk, candidate-created-path, differential-test, or before/after proof may block. Route `pre-existing` and `base-only` to follow-ups; `unknown` escalates. WARNING/SUGGESTION remain `info`. Deterministic blockers need no refuter; inferential blockers share one read-only refuter batch. Judgment Day uses two independent judges.
 
-If the first pass finds nothing, persist an empty ledger record rather than skip persistence.
+Before each lens, append the exact immutable candidate diff and changed-path manifest from START; if unavailable, stop.
 
-**Ledger persistence honors the artifact store.**
-- `openspec`: write `openspec/changes/{change-name}/review-ledger.md`.
-- `engram`: upsert topic `sdd/{change-name}/review-ledger` (ad-hoc judgment-day without a change: `review/{target-slug}/ledger`, where `target-slug` = `pr-{number}` when reviewing a PR, else the current branch name kebab-cased, else a kebab-case slug of the user-stated review target).
-- `none`: keep the ledger inline in the response; do not write files or Engram artifacts — the ledger lives only in this conversation; complete the review → fix → re-review loop within the session because it is not persisted across compaction.
+Ordinary review permits one correction transaction. When finalize reports correction required, rerun it with a positive `--correction-lines` forecast before editing. After the bounded edit, run one read-only scoped fix validator and pass its targeted result with `--validation <file>` plus final test/verification evidence with `--evidence <file>`. The facade maps correction only to corroborated frozen IDs and genesis paths, rejects over-budget repository evidence, and creates or discovers the terminal receipt. Later observations are follow-ups, not another correction. Judgment Day alone keeps its existing two-round rule. SDD then runs one independent requirements/runtime verification. Failure escalates and never starts another reviewer, refuter, correction, or validator.
 
-**Scoped re-review.** A re-review pass takes the persisted ledger and the fix diff as input. It MUST verify each ledger finding's resolution and MUST review only fix-touched lines; it MUST NOT re-read the full original diff. A finding on an untouched line MUST be logged with status `info` as a first-pass quality signal and MUST NOT by itself trigger another full round.
+<!-- authority-first-terminal-procedure:start -->
+### Authority-First Terminal Procedure
 
-## Notes on the schema (not part of the hand-copied block)
+Use only the compact facade; it appends and reads back native authority before materializing existing compatibility artifacts.
 
-**N and the ceiling.** N = 2 catches the single-pass sampling gap; the ceiling caps runaway review cost. R2 Readability is suggestion-heavy and cheap to re-run, so it may relax to N = 1.
+| Order | Operation | Required result | Terminal mirrors |
+|---|---|---|---|
+| 01 | `gentle-ai review start` | target, tier, lenses, and budget bound | blocked |
+| 02 | `gentle-ai review finalize` | results, evidence, native transitions, and receipt bound | blocked |
+| 03 | `gentle-ai review validate --gate <gate> --cwd <repo>` | authority, receipt, and live Git checked | blocked |
+| 04 | `reconcile-terminal-mirrors` | existing mirrors reconciled | allowed |
 
-**Status lifecycle.** `open` (first-pass finding) → `fixed` (fix agent changed code) → `verified` (re-review confirmed resolved). `wont-fix` = accepted/deferred with reason. `info` = a new finding on an untouched line (first-pass quality signal, NOT a re-round trigger), and also covers judgment-day's `WARNING (theoretical)` items — JD's real/theoretical distinction collapses onto `severity=WARNING` plus `status` (`open` vs `info`), so JD and the 4R lenses write the same table.
+After ambiguous output, rerun the same facade operation; native discovery resumes committed authority without another budget. Malformed or ambiguous lineage remains invalid.
+<!-- authority-first-terminal-procedure:end -->
 
-**Judgment-day.** The re-judge pass (following jd-fix-agent) follows this same scoped re-review contract: it verifies ledger findings and reviews only fix-touched lines.
+## Delivery
 
-## Execution modes
+Repository Git common-dir CAS remains authoritative. Existing transaction, policy, ledger, receipt, bundle, and gate-context schemas, prerequisites, and compatibility behavior remain unchanged in this work unit. Reconcile mirrors only after native allow. Supported lifecycle CLI gates are `post-apply`, `pre-commit`, `pre-push`, `pre-pr`, and `release`; they discover and validate the same receipt and never launch reviewers or create a budget. Archive still requires structured status with `reviewGate.result: allow` and its approved receipt. Model/provider/profile selection remains user-owned.
 
-The contract above is stated once; only ledger ownership differs by mode:
-
-- **Subagent mode** (Claude, Cursor, Kimi, Kiro): each review-* / jd-* agent
-  runs its lens exhaustively and returns its own ledger rows in its Output
-  contract; the orchestrator merges those subagent ledger rows into the
-  persisted ledger and persists per the branch above.
-- **Inline mode** (Codex, Gemini, Qwen, OpenCode/Kilocode, Windsurf,
-  Antigravity, Hermes, generic, and any adapter without dedicated review-*/
-  jd-* subagents): the orchestrator runs each lens sequentially in its own
-  context and maintains the merged ledger directly.
-
-## Interfaces / Contracts
-
-Canonical ledger row, rendered identically in every asset:
-
-```
-| id     | lens        | location            | severity | status | evidence            |
-|--------|-------------|---------------------|----------|--------|---------------------|
-| R1-001 | risk        | internal/x.go:42    | CRITICAL | open   | secret hardcoded    |
-| JD-004 | judgment-day| internal/y.go:88    | WARNING  | info   | theoretical path    |
-```
-
-## Adopting assets
-
-Hand-copy the sections above (Exhaustive first-pass, Findings ledger schema,
-Ledger persistence, Scoped re-review) into:
-
-- `internal/assets/{claude,cursor,kimi,kiro}/agents/review-{risk,readability,reliability,resilience}.md`
-- `internal/assets/{claude,kiro}/agents/jd-{judge-a,judge-b}.md`
-- Every `internal/assets/*/sdd-orchestrator.md` (Review Execution Contract section)
-- `internal/assets/skills/judgment-day/SKILL.md` and `references/prompts-and-formats.md`
-
-Exception: `internal/assets/{claude,kiro}/agents/jd-fix-agent.md` is NOT a
-hand-copy target for this judge-oriented block. It carries the distinct
-fix-agent clause set enforced by `requiredFixAgentClauses` in the test below —
-the fix role applies confirmed fixes and does not run the exhaustive first
-pass or emit a findings ledger. `references/prompts-and-formats.md` carries
-both: judge clauses in the Judge Prompt template, fix clauses in the Fix
-Agent Prompt template.
-
-Each surface also states its own execution-mode sentence per the "Execution
-modes" section above. `internal/components/sdd/review_ledger_contract_test.go`
-enforces this parity with a table-driven `requiredLedgerClauses` consistency
-check.
+Before commit, stage all reviewed paths without content/mode changes, then validate pre-commit. Frozen intended-untracked paths must remain all untracked or all move to an index whose complete tree and paths match the receipt.

@@ -46,3 +46,21 @@ For each task:
 5. Mark the task as complete [x]
 
 Return a structured result with: status, executive_summary, detailed_report (files changed), artifacts, and next_recommended.
+
+POST-APPLY REVIEW ROUTING:
+Return control to the parent orchestrator. If native status reports `nextRecommended: review`, the parent—not the apply executor—runs `gentle-ai review start --cwd <repo>`. The facade derives repository scope, lineage, tier, lenses, and correction budget from live Git.
+
+### Authority-First Terminal Procedure
+
+Use only the compact facade; it appends and reads back native authority before materializing existing compatibility artifacts.
+
+| Order | Operation | Required result | Terminal mirrors |
+|---|---|---|---|
+| 01 | `gentle-ai review start` | target, tier, lenses, and budget bound | blocked |
+| 02 | `gentle-ai review finalize` | results, evidence, native transitions, and receipt bound | blocked |
+| 03 | `gentle-ai review validate --gate <gate> --cwd <repo>` | authority, receipt, and live Git checked | blocked |
+| 04 | `reconcile-terminal-mirrors` | existing mirrors reconciled | allowed |
+
+After ambiguous output, rerun the same facade operation; native discovery resumes committed authority without another budget. Malformed or ambiguous lineage remains invalid.
+
+Reuse a valid receipt; never auto-launch Judgment Day or create another budget at commit/push/PR/release.
