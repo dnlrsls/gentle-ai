@@ -135,6 +135,10 @@ var reviewStopInvariantClassification = map[string]reviewStopDisposition{
 		// correction attempt is the designed limit), not a code defect.
 		ToolFault: reviewStopToolFault(false),
 	},
+	"rdd_disabled": {
+		Terminal:      false,
+		Justification: "caller-continuable: receipt-driven development is disabled; run `gentle-ai review mode enable` to turn it back on, then re-run the exact `review status --next-transition --contract <contract> <selector-args>` command that produced this stop — a concrete, flag-driven continuation; the same typed error the start gate already names",
+	},
 }
 
 type reviewStopDisposition struct {
