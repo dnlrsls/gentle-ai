@@ -127,6 +127,9 @@ func newReviewNextTransition(status ReviewTargetStatusResult, selectedLenses []s
 	if status.Applicability != reviewtransaction.TargetApplicabilityCurrent {
 		switch status.Applicability {
 		case reviewtransaction.TargetApplicabilityUnrelated:
+			if input.RDDModeResolved && !input.RDDMode.Enabled() {
+				return reviewStopTransition("rdd_disabled")
+			}
 			if input.Selector != nil && input.Selector.Kind == reviewtransaction.TargetBaseWorkspaceOverlay &&
 				input.Selector.Projection == reviewtransaction.ProjectionStaged {
 				return reviewStopTransition("staged_workspace_overlay_recovery_unavailable")
@@ -489,6 +492,8 @@ type reviewNextTransitionInput struct {
 	CaptureContext                                 *reviewCaptureContext
 	Selector                                       *reviewTransitionSelector
 	IntendedUntracked                              reviewIntendedUntrackedScope
+	RDDMode                                        reviewtransaction.RDDModeStatus
+	RDDModeResolved                                bool
 }
 
 const reviewSubmissionValuePlaceholder = "{{value}}"
@@ -595,9 +600,12 @@ func reviewStartArguments(status ReviewTargetStatusResult, lineage string, runti
 		contract = ReviewIntegrationContractV1
 	}
 	arguments := []ReviewTransitionArgument{
-		{Name: "contract", Value: contract},
+		{Name: "cwd", Value: status.repositoryRoot}, {Name: "contract", Value: contract},
 		{Name: "target", Value: status.TargetIdentity},
 		{Name: "projection", Value: string(status.Projection.Projection)},
+	}
+	if status.repositoryRoot == "" {
+		arguments = arguments[1:]
 	}
 	switch status.Projection.Kind {
 	case reviewtransaction.TargetBaseDiff:

@@ -90,6 +90,9 @@ type ReviewTargetStatusResult struct {
 	ValidationRequest      *reviewtransaction.TargetedValidationRequest         `json:"validation_request,omitempty"`
 	FinalVerificationRetry *reviewtransaction.FinalVerificationRetryEligibility `json:"final_verification_retry,omitempty"`
 	intendedUntracked      reviewIntendedUntrackedScope
+	repositoryRoot         string
+	rddMode                reviewtransaction.RDDModeStatus
+	rddModeResolved        bool
 }
 
 // ReviewActionEligibility remains an additive compatibility detail for older
@@ -166,6 +169,7 @@ const (
 	reviewActionForbiddenReconciliation        = "forbidden_reconciliation_requires_exact_request"
 	reviewActionForbiddenInputsUnavailable     = "forbidden_required_inputs_unavailable"
 	reviewActionForbiddenFinalizeStatus        = "forbidden_finalize_requires_target_status"
+	reviewActionForbiddenRDDDisabled           = "forbidden_rdd_disabled"
 )
 
 type ReviewFinalizeReconciliation struct {
@@ -267,7 +271,11 @@ func newReviewActionEligibility(status ReviewTargetStatusResult) *ReviewActionEl
 	allowed := ReviewEligibleAction{RequiredInputs: []string{}}
 	switch status.Action {
 	case reviewtransaction.TargetStatusActionStart:
-		allowed.Action, allowed.ReasonCode = "review.start", reviewActionEligibleCurrent
+		if status.rddModeResolved && !status.rddMode.Enabled() {
+			allowed.Action, allowed.ReasonCode = "stop", reviewActionForbiddenRDDDisabled
+		} else {
+			allowed.Action, allowed.ReasonCode = "review.start", reviewActionEligibleCurrent
+		}
 	case reviewtransaction.TargetStatusActionValidate:
 		allowed.Action, allowed.ReasonCode = "stop", reviewActionForbiddenInputsUnavailable
 	case reviewtransaction.TargetStatusActionFinalize:
@@ -326,6 +334,8 @@ func newReviewActionEligibility(status ReviewTargetStatusResult) *ReviewActionEl
 		forbiddenReason = reviewActionForbiddenUnchangedEscalated
 	case status.Action == reviewtransaction.TargetStatusActionReconcileFinalize:
 		forbiddenReason = reviewActionForbiddenReconciliation
+	case status.Action == reviewtransaction.TargetStatusActionStart && status.rddModeResolved && !status.rddMode.Enabled():
+		forbiddenReason = reviewActionForbiddenRDDDisabled
 	case allowed.Action == "stop" && allowed.ReasonCode == reviewActionForbiddenInputsUnavailable:
 		forbiddenReason = reviewActionForbiddenInputsUnavailable
 	}
@@ -712,6 +722,13 @@ func (result ReviewTargetStatusResult) validateNextTransitionTargets() error {
 		if result.Action == reviewtransaction.TargetStatusActionStop {
 			if result.NextTransition.Kind != reviewNextTransitionStop || result.NextTransition.ReasonCode != "staged_workspace_overlay_recovery_unavailable" {
 				return errors.New("fresh staged workspace-overlay target lacks a STOP transition")
+			}
+			return nil
+		}
+		if result.Action == reviewtransaction.TargetStatusActionStart && result.rddModeResolved && !result.rddMode.Enabled() {
+			if result.NextTransition.Kind != reviewNextTransitionStop || result.NextTransition.ReasonCode != "rdd_disabled" {
+				// refusal:by-design world-action: only a producer defect can pair a disabled effective mode with a fresh transition other than rdd_disabled
+				return errors.New("disabled fresh target lacks an RDD STOP transition")
 			}
 			return nil
 		}
@@ -1362,9 +1379,14 @@ func (eligibility ReviewActionEligibility) Validate(status ReviewTargetStatusRes
 	if strings.TrimSpace(allowed.Action) == "" || strings.TrimSpace(allowed.ReasonCode) == "" || allowed.RequiredInputs == nil {
 		return errors.New("review action eligibility has an invalid allowed action")
 	}
-	if status.Action == reviewtransaction.TargetStatusActionStart &&
+	if status.Action == reviewtransaction.TargetStatusActionStart && (!status.rddModeResolved || status.rddMode.Enabled()) &&
 		(allowed.Action != "review.start" || allowed.ReasonCode != reviewActionEligibleCurrent || len(allowed.RequiredInputs) != 0) {
 		return errors.New("fresh target eligibility does not allow START")
+	}
+	if status.Action == reviewtransaction.TargetStatusActionStart && status.rddModeResolved && !status.rddMode.Enabled() &&
+		(allowed.Action != "stop" || allowed.ReasonCode != reviewActionForbiddenRDDDisabled || len(allowed.RequiredInputs) != 0) {
+		// refusal:by-design world-action: only a producer defect can advertise START after the resolved mode disabled it
+		return errors.New("disabled fresh target eligibility does not stop START")
 	}
 	seen := map[string]bool{allowed.Action: true}
 	if allowed.Action == "review.recover" || allowed.Action == ReviewIntegrationOperationRetryFinalVerification {

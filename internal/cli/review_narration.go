@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/model"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/reviewtransaction"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/sddstatus"
 )
 
@@ -153,6 +154,7 @@ var reviewStopReasonNarration = map[string]string{
 	"original_finalize_request_required": "Re-run `gentle-ai review finalize` with the exact same results or evidence you submitted before.",
 	"recovery_scope_unchanged": "Change the candidate so it targets something different from what is already on record, then retry the recovery, " +
 		"or run `" + reviewModeDisableCloneCommand + "` " + reviewModeDisableCloneCaveat + " to deliver under ordinary repository policy instead.",
+	"rdd_disabled": "Receipt-driven development is disabled. Run `gentle-ai review mode status --cwd <repo> --json` to inspect the deciding scope; STATUS renders the exact scoped enable command for this request.",
 	"staged_workspace_overlay_recovery_unavailable": "Pass `--lineage <id>` to continue the review you already started, " +
 		"or drop `--workspace-overlay` and run `gentle-ai review start --projection staged` to start fresh.",
 	"unchanged_or_unverified_authority": "This review already used its one correction attempt without a verified change. " +
@@ -241,12 +243,39 @@ func reviewStopReasonStatement(reason string) (string, bool) {
 // terminal state emits exactly one statement" scenario. A reason with no
 // registry entry prints nothing: TestReviewNarrationRegistryCoversEveryStopReasonCode
 // is the fail-closed proof that should never happen for a code the source emits.
-func reviewNarrateStopReason(reason string, runtimeAgent model.AgentID) {
+func reviewNarrateStopReason(reason string, runtimeAgent model.AgentID, continuation string) {
 	statement, ok := reviewStopReasonStatement(reason)
 	if !ok {
 		return
 	}
+	if strings.TrimSpace(continuation) != "" {
+		statement = continuation
+	}
 	_, _ = fmt.Fprintln(reviewNarrationOutput, bindNarrationRuntimeIdentity(statement, runtimeAgent))
+}
+
+func reviewRDDDisabledNarration(mode reviewtransaction.RDDModeStatus, root string, statusArgs []string) string {
+	enable := "gentle-ai review mode enable --scope=global"
+	if mode.Source == reviewtransaction.RDDModeSourceCloneLocal {
+		enable = "gentle-ai review mode enable --scope=clone --cwd=" + reviewTransitionShellWord(root)
+	}
+	parts := []string{reviewTransitionCommandTool, "review", "status"}
+	if !reviewStatusArgsContainCWD(statusArgs) {
+		parts = append(parts, reviewTransitionShellWord("--cwd="+root))
+	}
+	for _, argument := range statusArgs {
+		parts = append(parts, reviewTransitionShellWord(argument))
+	}
+	return "Receipt-driven development is disabled. Run `" + enable + "`, then re-run `" + strings.Join(parts, " ") + "`."
+}
+
+func reviewStatusArgsContainCWD(args []string) bool {
+	for _, argument := range args {
+		if argument == "--cwd" || strings.HasPrefix(argument, "--cwd=") {
+			return true
+		}
+	}
+	return false
 }
 
 // reviewNarrateForecast keeps the v2 machine envelope on stdout while showing
