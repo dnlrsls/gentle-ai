@@ -294,7 +294,6 @@ func TestRealOpenCodeReviewerOrdinarySessionInjectsFrozenContextAndAdmitsRawOutp
 	}
 }
 
-// organicCommandArguments removes POSIX shell quoting before passing Windows CWDs to Go flags.
 func organicCommandArguments(t *testing.T, command string) []string {
 	t.Helper()
 	fields, err := organicCommandWords(command)

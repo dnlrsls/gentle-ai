@@ -182,6 +182,10 @@ func TestIntendedUntrackedInvalidIntentNeverCreatesAuthority(t *testing.T) {
 
 func TestIntendedUntrackedConsentFollowUpPreservesSelectedScope(t *testing.T) {
 	repo := initReviewCLIRepo(t)
+	if err := os.Rename(repo, repo+" space"); err != nil {
+		t.Fatal(err)
+	}
+	repo += " space"
 	path := "scripts/deploy candidate.sh"
 	writeUndeclaredWorkspaceFile(t, repo, path, "#!/bin/sh\necho deploy\n", 0o755)
 	digest, _ := intendedUntrackedSelection(t, intendedUntrackedStatus(t, repo))

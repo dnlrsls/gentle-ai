@@ -2204,7 +2204,7 @@ func reviewConsentFollowUpBase(
 	parts := []string{
 		"gentle-ai review start",
 		"--contract " + contract,
-		"--cwd " + cwd,
+		reviewTransitionShellWord("--cwd=" + cwd),
 		"--target " + target,
 		"--projection " + string(projection),
 	}

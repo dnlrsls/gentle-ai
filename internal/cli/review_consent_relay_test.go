@@ -46,7 +46,10 @@ func decodeConsentQuestion(t *testing.T, payload []byte) ReviewIntegrationConsen
 // literally runnable rather than merely descriptive.
 func invocationArgs(t *testing.T, invocation string) []string {
 	t.Helper()
-	fields := strings.Fields(invocation)
+	fields, err := SplitPrintedCommandWords(invocation)
+	if err != nil {
+		t.Fatalf("parse consent invocation %q: %v", invocation, err)
+	}
 	if len(fields) < 3 || fields[0] != "gentle-ai" || fields[1] != "review" || fields[2] != "start" {
 		t.Fatalf("consent invocation is not a runnable gentle-ai review start command: %q", invocation)
 	}
@@ -507,7 +510,7 @@ func TestV21ConsentInvocationMustMatchProviderOwnedRequest(t *testing.T) {
 	if err := json.Unmarshal(fixture, &question); err != nil {
 		t.Fatal(err)
 	}
-	base := reviewConsentFollowUpBase("/repo", question.TargetIdentity, question.Projection, "review-consent-fixture", "", "", "reliability", "", false, false, ReviewIntegrationContractV2, "", "", reviewIntendedUntrackedScope{})
+	base := strings.ReplaceAll(reviewConsentFollowUpBase(`C:\repo`, question.TargetIdentity, question.Projection, "review-consent-fixture", "", "", "reliability", "", false, false, ReviewIntegrationContractV2, "", "", reviewIntendedUntrackedScope{}), `C:\repo`, "/repo")
 	if err := validateReviewConsentInvocations(question, base); err != nil {
 		t.Fatalf("canonical v2.1 consent invocation: %v", err)
 	}

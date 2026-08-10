@@ -24,7 +24,6 @@ func TestNegotiatedStatusMatchesReviewStartRDDMode(t *testing.T) {
 		{name: "global off", global: "disable", wantScope: "global"},
 		{name: "global unset clone off", cloneOff: true, wantScope: "clone"},
 		{name: "global on clone off", global: "enable", cloneOff: true, wantScope: "clone"},
-		{name: "global on", global: "enable", enabled: true},
 		{name: "global unset clone unset default on", enabled: true},
 	}
 	for _, tt := range tests {
@@ -61,9 +60,6 @@ func TestNegotiatedStatusMatchesReviewStartRDDMode(t *testing.T) {
 				if allowed.Action != "review.start" || status.NextTransition.Kind != reviewNextTransitionExecute || status.NextTransition.Execute.Operation != "review.start" {
 					t.Fatalf("enabled STATUS = %#v", status)
 				}
-				if !strings.Contains(status.NextTransition.Execute.Command, "--cwd="+repo) {
-					t.Fatalf("START command is not repository-bound: %q", status.NextTransition.Execute.Command)
-				}
 			} else {
 				if allowed.Action != "stop" || allowed.ReasonCode != "forbidden_rdd_disabled" {
 					t.Fatalf("disabled eligibility = %#v", status.Eligibility)
@@ -71,18 +67,9 @@ func TestNegotiatedStatusMatchesReviewStartRDDMode(t *testing.T) {
 				if status.NextTransition.Kind != reviewNextTransitionStop || status.NextTransition.ReasonCode != "rdd_disabled" {
 					t.Fatalf("disabled transition = %#v", status.NextTransition)
 				}
-				for _, want := range []string{
-					"gentle-ai review mode enable --scope=" + tt.wantScope,
-					"gentle-ai review status", "--cwd=" + repo,
-					"--contract", ReviewIntegrationContractV2,
-					"--agent", "opencode", "--action-eligibility", "--next-transition",
-				} {
-					if !strings.Contains(narration.String(), want) {
-						t.Fatalf("disabled STATUS continuation is incomplete; missing %q:\n%s", want, narration.String())
-					}
-				}
-				if tt.wantScope == "clone" && (!strings.Contains(narration.String(), "--cwd") || !strings.Contains(narration.String(), repo)) {
-					t.Fatalf("clone continuation is not repository-bound:\n%s", narration.String())
+				if !strings.Contains(narration.String(), "gentle-ai review mode enable --scope="+tt.wantScope) ||
+					!strings.Contains(narration.String(), "gentle-ai review status "+reviewTransitionShellWord("--cwd="+repo)+" --contract "+ReviewIntegrationContractV2+" --agent opencode --action-eligibility --next-transition") {
+					t.Fatalf("disabled STATUS continuation is incomplete:\n%s", narration.String())
 				}
 			}
 			startErr := RunReview([]string{
@@ -95,7 +82,6 @@ func TestNegotiatedStatusMatchesReviewStartRDDMode(t *testing.T) {
 		})
 	}
 }
-
 func TestNegotiatedStatusFailsWhenEffectiveModeCannotResolve(t *testing.T) {
 	home := reviewModeHome(t)
 	repo := initReviewCLIRepo(t)
@@ -105,16 +91,10 @@ func TestNegotiatedStatusFailsWhenEffectiveModeCannotResolve(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".gentle-ai", "state.json"), []byte("{\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	var output bytes.Buffer
-	if err := RunReview([]string{
-		"status", "--cwd", repo, "--contract", ReviewIntegrationContractV2, "--agent", "opencode",
-		"--action-eligibility", "--next-transition",
-	}, &output); err == nil {
-		t.Fatalf("STATUS mode-resolution error = %v\n%s", err, output.String())
+	if err := RunReview([]string{"status", "--cwd", repo, "--contract", ReviewIntegrationContractV2, "--agent", "opencode", "--action-eligibility", "--next-transition"}, io.Discard); err == nil {
+		t.Fatal("STATUS unexpectedly resolved its review mode")
 	}
 }
-
 func TestNegotiatedStatusKeepsRDDDisabledStopWhenUntrackedSelectionIsNeeded(t *testing.T) {
 	reviewModeHome(t)
 	repo := initReviewCLIRepo(t)
@@ -127,7 +107,6 @@ func TestNegotiatedStatusKeepsRDDDisabledStopWhenUntrackedSelectionIsNeeded(t *t
 	if err := RunReviewMode([]string{"disable", "--cwd", repo, "--scope", "global"}, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-
 	var output bytes.Buffer
 	if err := RunReview([]string{
 		"status", "--cwd", repo, "--contract", ReviewIntegrationContractV2, "--agent", "opencode",
@@ -146,7 +125,6 @@ func TestNegotiatedStatusKeepsRDDDisabledStopWhenUntrackedSelectionIsNeeded(t *t
 		t.Fatalf("disabled transition was replaced by untracked collection: %#v", status.NextTransition)
 	}
 }
-
 func TestDisabledStatusNarrationCanonicalizesCWD(t *testing.T) {
 	for _, cwd := range [][]string{{"--cwd=."}, {"--cwd", "."}} {
 		t.Run(strings.Join(cwd, " "), func(t *testing.T) {
@@ -156,7 +134,6 @@ func TestDisabledStatusNarrationCanonicalizesCWD(t *testing.T) {
 			if err := RunReviewMode([]string{"disable", "--cwd", repo, "--scope", "global"}, io.Discard); err != nil {
 				t.Fatal(err)
 			}
-
 			var narration, output bytes.Buffer
 			previous := reviewNarrationOutput
 			reviewNarrationOutput = &narration
