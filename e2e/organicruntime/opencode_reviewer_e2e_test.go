@@ -293,18 +293,95 @@ func TestRealOpenCodeReviewerOrdinarySessionInjectsFrozenContextAndAdmitsRawOutp
 	}
 }
 
-// organicCommandArguments splits one negotiated transition's literally
-// runnable command string into the argv this test hands to harness.gentle,
-// dropping only the leading "gentle-ai" binary token. Every value in these
-// commands (hashes, lineage names, opaque handles) is a single
-// whitespace-free token, so a plain field split is exact.
+// organicCommandArguments parses the command renderer's POSIX shell words
+// before handing argv to harness.gentle. The renderer quotes a Windows CWD
+// containing spaces; passing those quote bytes through to the Go flag parser
+// would turn a valid `--cwd` argument into a different, invalid value.
 func organicCommandArguments(t *testing.T, command string) []string {
 	t.Helper()
-	fields := strings.Fields(command)
+	fields, err := organicCommandWords(command)
+	if err != nil {
+		t.Fatalf("parse negotiated transition command %q: %v", command, err)
+	}
 	if len(fields) == 0 || fields[0] != "gentle-ai" {
 		t.Fatalf("negotiated transition command does not start with gentle-ai: %q", command)
 	}
 	return append([]string(nil), fields[1:]...)
+}
+
+func organicCommandWords(command string) ([]string, error) {
+	words := []string{}
+	var word strings.Builder
+	inQuote := false
+	for index := 0; index < len(command); index++ {
+		char := command[index]
+		switch {
+		case char == '\'':
+			inQuote = !inQuote
+		case char == '\\' && !inQuote && index+1 < len(command):
+			index++
+			word.WriteByte(command[index])
+		case (char == ' ' || char == '\t') && !inQuote:
+			if word.Len() != 0 {
+				words = append(words, word.String())
+				word.Reset()
+			}
+		default:
+			word.WriteByte(char)
+		}
+	}
+	if inQuote {
+		return nil, errors.New("unterminated shell quote")
+	}
+	if word.Len() != 0 {
+		words = append(words, word.String())
+	}
+	return words, nil
+}
+
+func TestOrganicCommandArgumentsPreservesQuotedWindowsCWD(t *testing.T) {
+	arguments := organicCommandArguments(t, "gentle-ai review start --cwd='C:\\Users\\reviewer name\\repo' --contract=gentle-ai.review-integration/v2")
+	want := []string{"review", "start", "--cwd=C:\\Users\\reviewer name\\repo", "--contract=gentle-ai.review-integration/v2"}
+	if len(arguments) != len(want) {
+		t.Fatalf("argv = %#v, want %#v", arguments, want)
+	}
+	for index, value := range want {
+		if arguments[index] != value {
+			t.Fatalf("argv[%d] = %q, want %q", index, arguments[index], value)
+		}
+		if strings.ContainsAny(arguments[index], "'\"") {
+			t.Fatalf("argv[%d] retains a shell quote: %q", index, arguments[index])
+		}
+	}
+}
+
+func TestOrganicCommandArgumentsExecuteStartWithWindowsCWD(t *testing.T) {
+	harness := newOrganicHarness(t)
+	spacedWorktree := harness.repo.worktree + " space"
+	if err := os.Rename(harness.repo.worktree, spacedWorktree); err != nil {
+		t.Fatal(err)
+	}
+	harness.repo.worktree = spacedWorktree
+	harness.writeFiles(map[string]string{"docs/candidate.md": "candidate\n"})
+	harness.git("commit", "-qm", "test: spaced cwd candidate")
+
+	status := organicNegotiatedStatus(t, harness, "windows-cwd-start")
+	if status.NextTransition == nil || status.NextTransition.Execute == nil || status.NextTransition.Execute.Operation != "review.start" {
+		t.Fatalf("STATUS transition = %#v", status.NextTransition)
+	}
+	if !strings.Contains(status.NextTransition.Execute.Command, "'--cwd="+spacedWorktree+"'") {
+		t.Fatalf("START command does not safely render the spaced cwd: %q", status.NextTransition.Execute.Command)
+	}
+	arguments := organicCommandArguments(t, status.NextTransition.Execute.Command)
+	if got := organicArgumentValue(arguments, "--cwd"); got != spacedWorktree {
+		t.Fatalf("START argv cwd = %q, want %q (argv %#v)", got, spacedWorktree, arguments)
+	}
+	for _, argument := range arguments {
+		if strings.ContainsAny(argument, "'\"") {
+			t.Fatalf("START argv retains a shell quote: %#v", arguments)
+		}
+	}
+	harness.gentle(arguments...)
 }
 
 func organicArgumentValue(arguments []string, flag string) string {

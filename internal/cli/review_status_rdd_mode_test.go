@@ -76,7 +76,7 @@ func TestNegotiatedStatusMatchesReviewStartRDDMode(t *testing.T) {
 				}
 				for _, want := range []string{
 					"gentle-ai review mode enable --scope=" + tt.wantScope,
-					"gentle-ai review status --cwd", repo,
+					"gentle-ai review status", "--cwd=" + repo,
 					"--contract", ReviewIntegrationContractV2,
 					"--agent", "opencode", "--action-eligibility", "--next-transition",
 				} {
@@ -151,5 +151,34 @@ func TestNegotiatedStatusKeepsRDDDisabledStopWhenUntrackedSelectionIsNeeded(t *t
 	}
 	if status.NextTransition.Kind != reviewNextTransitionStop || status.NextTransition.ReasonCode != "rdd_disabled" || status.NextTransition.Collect != nil {
 		t.Fatalf("disabled transition was replaced by untracked collection: %#v", status.NextTransition)
+	}
+}
+
+func TestDisabledStatusNarrationCanonicalizesCWD(t *testing.T) {
+	for _, cwd := range [][]string{{"--cwd=."}, {"--cwd", "."}} {
+		t.Run(strings.Join(cwd, " "), func(t *testing.T) {
+			reviewModeHome(t)
+			repo := initReviewCLIRepo(t)
+			t.Chdir(repo)
+			if err := RunReviewMode([]string{"disable", "--cwd", repo, "--scope", "global"}, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+
+			var narration, output bytes.Buffer
+			previous := reviewNarrationOutput
+			reviewNarrationOutput = &narration
+			t.Cleanup(func() { reviewNarrationOutput = previous })
+			args := append([]string{"status"}, cwd...)
+			args = append(args, "--contract", ReviewIntegrationContractV2, "--agent", "opencode", "--next-transition")
+			if err := RunReview(args, &output); err != nil {
+				t.Fatalf("STATUS: %v\n%s", err, output.String())
+			}
+			if !strings.Contains(narration.String(), "--cwd="+repo) {
+				t.Fatalf("STATUS retry is not bound to the resolved root:\n%s", narration.String())
+			}
+			if strings.Contains(narration.String(), "--cwd=. --contract") || strings.Contains(narration.String(), "--cwd . --contract") {
+				t.Fatalf("STATUS retry retained caller cwd %q:\n%s", strings.Join(cwd, " "), narration.String())
+			}
+		})
 	}
 }

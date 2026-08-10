@@ -259,23 +259,19 @@ func reviewRDDDisabledNarration(mode reviewtransaction.RDDModeStatus, root strin
 	if mode.Source == reviewtransaction.RDDModeSourceCloneLocal {
 		enable = "gentle-ai review mode enable --scope=clone --cwd=" + reviewTransitionShellWord(root)
 	}
-	parts := []string{reviewTransitionCommandTool, "review", "status"}
-	if !reviewStatusArgsContainCWD(statusArgs) {
-		parts = append(parts, reviewTransitionShellWord("--cwd="+root))
-	}
-	for _, argument := range statusArgs {
+	parts := []string{reviewTransitionCommandTool, "review", "status", reviewTransitionShellWord("--cwd=" + root)}
+	for index := 0; index < len(statusArgs); index++ {
+		argument := statusArgs[index]
+		if argument == "--cwd" {
+			index++
+			continue
+		}
+		if strings.HasPrefix(argument, "--cwd=") {
+			continue
+		}
 		parts = append(parts, reviewTransitionShellWord(argument))
 	}
 	return "Receipt-driven development is disabled. Run `" + enable + "`, then re-run `" + strings.Join(parts, " ") + "`."
-}
-
-func reviewStatusArgsContainCWD(args []string) bool {
-	for _, argument := range args {
-		if argument == "--cwd" || strings.HasPrefix(argument, "--cwd=") {
-			return true
-		}
-	}
-	return false
 }
 
 // reviewNarrateForecast keeps the v2 machine envelope on stdout while showing
