@@ -910,10 +910,6 @@ func (result ReviewTargetStatusResult) validateStartNextTransition() error {
 	}
 	if result.repositoryRoot == "" {
 		result.repositoryRoot = arguments["cwd"]
-		if result.repositoryRoot == "" && strings.Contains(transition.Execute.Command, "--cwd") {
-			// refusal:by-design world-action: only a producer defect can publish a repository-bound START command without its cwd argument
-			return errors.New("fresh target START transition omits its repository context")
-		}
 	}
 	lineage := arguments["lineage"]
 	if lineage != "" && !validReviewIntegrationLineage(lineage) {
@@ -1295,6 +1291,9 @@ func reviewTransitionArgumentMap(arguments []ReviewTransitionArgument, operation
 }
 
 func validateReviewTransitionExecution(execution ReviewTransitionExecution, arguments map[string]string) error {
+	if execution.Command != reviewTransitionCommandLine(execution.Operation, execution.Arguments) {
+		return errors.New("execution transition command does not match its arguments") // refusal:by-design world-action: a producer must publish the exact command its executable arguments define
+	}
 	exact := func(required []string, selectors []ReviewTransitionArgument) bool {
 		if len(arguments) != len(required)+len(selectors) {
 			return false

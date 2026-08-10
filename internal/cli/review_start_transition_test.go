@@ -269,12 +269,7 @@ func TestStatusRejectsNonCanonicalStartTransition(t *testing.T) {
 	valid := negotiatedStartStatus(t, repo)
 	for _, mutate := range []func(*ReviewTargetStatusResult){
 		func(status *ReviewTargetStatusResult) {
-			for index := range status.NextTransition.Execute.Arguments {
-				if status.NextTransition.Execute.Arguments[index].Name == "cwd" {
-					status.NextTransition.Execute.Arguments[index].Name = "missing-cwd"
-					break
-				}
-			}
+			status.NextTransition.Execute.Arguments = status.NextTransition.Execute.Arguments[1:]
 		},
 		func(status *ReviewTargetStatusResult) {
 			status.NextTransition.Execute.Arguments = append(status.NextTransition.Execute.Arguments, ReviewTransitionArgument{Name: "base-tree", Value: status.Projection.BaseTree})
@@ -294,6 +289,12 @@ func TestStatusRejectsNonCanonicalStartTransition(t *testing.T) {
 		if err := invalid.Validate(); err == nil {
 			t.Fatalf("status accepted non-canonical START: %#v", invalid.NextTransition)
 		}
+	}
+	valid.intendedUntracked = reviewIntendedUntrackedScope{Declared: true, Digest: "untracked", Intended: []string{"note--cwd.txt"}}
+	valid.NextTransition.Execute.Arguments = reviewTokenizedTransitionArguments(reviewStartArguments(valid, "", "", valid.intendedUntracked))
+	valid.NextTransition.Execute.Command = reviewTransitionCommandLine(valid.NextTransition.Execute.Operation, valid.NextTransition.Execute.Arguments)
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("status treated embedded --cwd as an explicit flag: %v", err)
 	}
 }
 
