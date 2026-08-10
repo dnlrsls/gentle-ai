@@ -154,7 +154,7 @@ var reviewStopReasonNarration = map[string]string{
 	"original_finalize_request_required": "Re-run `gentle-ai review finalize` with the exact same results or evidence you submitted before.",
 	"recovery_scope_unchanged": "Change the candidate so it targets something different from what is already on record, then retry the recovery, " +
 		"or run `" + reviewModeDisableCloneCommand + "` " + reviewModeDisableCloneCaveat + " to deliver under ordinary repository policy instead.",
-	"rdd_disabled": "Receipt-driven development is disabled. Run `gentle-ai review mode status --cwd <repo> --json` to inspect the deciding scope; STATUS renders the exact scoped enable command for this request.",
+	"rdd_disabled": "Review mode is disabled. Run `gentle-ai review mode status --cwd <repo> --json` to inspect the deciding scope; STATUS renders the exact scoped enable command for this request.",
 	"staged_workspace_overlay_recovery_unavailable": "Pass `--lineage <id>` to continue the review you already started, " +
 		"or drop `--workspace-overlay` and run `gentle-ai review start --projection staged` to start fresh.",
 	"unchanged_or_unverified_authority": "This review already used its one correction attempt without a verified change. " +
@@ -271,7 +271,7 @@ func reviewRDDDisabledNarration(mode reviewtransaction.RDDModeStatus, root strin
 		}
 		parts = append(parts, reviewTransitionShellWord(argument))
 	}
-	return "Receipt-driven development is disabled. Run `" + enable + "`, then re-run `" + strings.Join(parts, " ") + "`."
+	return "Review mode is disabled. Run `" + enable + "`, then re-run `" + strings.Join(parts, " ") + "`."
 }
 
 // reviewNarrateForecast keeps the v2 machine envelope on stdout while showing

@@ -908,6 +908,13 @@ func (result ReviewTargetStatusResult) validateStartNextTransition() error {
 	if err != nil {
 		return err
 	}
+	if result.repositoryRoot == "" {
+		result.repositoryRoot = arguments["cwd"]
+		if result.repositoryRoot == "" && strings.Contains(transition.Execute.Command, "--cwd") {
+			// refusal:by-design world-action: only a producer defect can publish a repository-bound START command without its cwd argument
+			return errors.New("fresh target START transition omits its repository context")
+		}
+	}
 	lineage := arguments["lineage"]
 	if lineage != "" && !validReviewIntegrationLineage(lineage) {
 		return errors.New("fresh target START lineage is not canonical")

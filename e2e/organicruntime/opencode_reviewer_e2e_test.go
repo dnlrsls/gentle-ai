@@ -17,6 +17,7 @@ import (
 
 	"github.com/gentleman-programming/gentle-ai/v2/internal/agents/opencode"
 	"github.com/gentleman-programming/gentle-ai/v2/internal/components/sdd"
+	"github.com/gentleman-programming/gentle-ai/v2/internal/pathquote"
 )
 
 // openCodePoisonedReviewSetup is the shared fixture for the ordinary-session
@@ -369,7 +370,7 @@ func TestOrganicCommandArgumentsExecuteStartWithWindowsCWD(t *testing.T) {
 	if status.NextTransition == nil || status.NextTransition.Execute == nil || status.NextTransition.Execute.Operation != "review.start" {
 		t.Fatalf("STATUS transition = %#v", status.NextTransition)
 	}
-	if !strings.Contains(status.NextTransition.Execute.Command, "'--cwd="+spacedWorktree+"'") {
+	if !strings.Contains(status.NextTransition.Execute.Command, pathquote.ShellWord("--cwd="+spacedWorktree)) {
 		t.Fatalf("START command does not safely render the spaced cwd: %q", status.NextTransition.Execute.Command)
 	}
 	arguments := organicCommandArguments(t, status.NextTransition.Execute.Command)

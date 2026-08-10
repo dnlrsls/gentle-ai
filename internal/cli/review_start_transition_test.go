@@ -128,12 +128,13 @@ func TestNegotiatedV2FreshStatusIncludesExactConsentRelay(t *testing.T) {
 	writeReviewStartCandidate(t, repo, "scripts/deploy.sh", "echo deploy\n", 0o644)
 
 	status := negotiatedStartStatusForContract(t, repo, ReviewIntegrationContractV2, "--lineage", "status-v2-consent-relay")
-	assertStartTransition(t, status, []string{"contract", "target", "projection", "lineage", "consent"})
+	assertStartTransition(t, status, []string{"cwd", "contract", "target", "projection", "lineage", "consent"})
 	consent := status.NextTransition.Execute.Arguments[len(status.NextTransition.Execute.Arguments)-1]
 	if consent != (ReviewTransitionArgument{Name: "consent", Value: "relay", Token: "--consent=relay"}) {
 		t.Fatalf("v2 START consent argument = %#v", consent)
 	}
 	wantCommand := "gentle-ai review start" +
+		" " + reviewTransitionShellWord("--cwd="+repo) +
 		" --contract=" + ReviewIntegrationContractV2 +
 		" --target=" + status.TargetIdentity +
 		" --projection=workspace" +
@@ -156,7 +157,7 @@ func TestNegotiatedV2FreshStatusIncludesExactConsentRelay(t *testing.T) {
 	}
 
 	legacy := negotiatedStartStatusForContract(t, repo, ReviewIntegrationContractV1, "--lineage", "status-v1-compatible")
-	assertStartTransition(t, legacy, []string{"contract", "target", "projection", "lineage"})
+	assertStartTransition(t, legacy, []string{"cwd", "contract", "target", "projection", "lineage"})
 	if strings.Contains(legacy.NextTransition.Execute.Command, "--consent") {
 		t.Fatalf("v1 START command changed compatibility behavior: %s", legacy.NextTransition.Execute.Command)
 	}
@@ -268,7 +269,12 @@ func TestStatusRejectsNonCanonicalStartTransition(t *testing.T) {
 	valid := negotiatedStartStatus(t, repo)
 	for _, mutate := range []func(*ReviewTargetStatusResult){
 		func(status *ReviewTargetStatusResult) {
-			status.NextTransition.Execute.Arguments = status.NextTransition.Execute.Arguments[1:]
+			for index := range status.NextTransition.Execute.Arguments {
+				if status.NextTransition.Execute.Arguments[index].Name == "cwd" {
+					status.NextTransition.Execute.Arguments[index].Name = "missing-cwd"
+					break
+				}
+			}
 		},
 		func(status *ReviewTargetStatusResult) {
 			status.NextTransition.Execute.Arguments = append(status.NextTransition.Execute.Arguments, ReviewTransitionArgument{Name: "base-tree", Value: status.Projection.BaseTree})

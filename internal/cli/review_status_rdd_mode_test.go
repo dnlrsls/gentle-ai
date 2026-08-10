@@ -27,7 +27,6 @@ func TestNegotiatedStatusMatchesReviewStartRDDMode(t *testing.T) {
 		{name: "global on", global: "enable", enabled: true},
 		{name: "global unset clone unset default on", enabled: true},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reviewModeHome(t)
@@ -43,7 +42,6 @@ func TestNegotiatedStatusMatchesReviewStartRDDMode(t *testing.T) {
 			if tt.cloneOff {
 				disableReviewForClone(t, repo)
 			}
-
 			var narration, output bytes.Buffer
 			previousNarrationOutput := reviewNarrationOutput
 			reviewNarrationOutput = &narration
@@ -58,7 +56,6 @@ func TestNegotiatedStatusMatchesReviewStartRDDMode(t *testing.T) {
 			if err := json.Unmarshal(output.Bytes(), &status); err != nil {
 				t.Fatalf("decode STATUS: %v\n%s", err, output.String())
 			}
-
 			allowed := status.Eligibility.AllowedActions[0]
 			if tt.enabled {
 				if allowed.Action != "review.start" || status.NextTransition.Kind != reviewNextTransitionExecute || status.NextTransition.Execute.Operation != "review.start" {
@@ -88,7 +85,6 @@ func TestNegotiatedStatusMatchesReviewStartRDDMode(t *testing.T) {
 					t.Fatalf("clone continuation is not repository-bound:\n%s", narration.String())
 				}
 			}
-
 			startErr := RunReview([]string{
 				"start", "--cwd", repo, "--contract", ReviewIntegrationContractV2, "--agent", "opencode",
 				"--target", status.TargetIdentity, "--projection", "workspace", "--consent", "granted",
@@ -103,9 +99,6 @@ func TestNegotiatedStatusMatchesReviewStartRDDMode(t *testing.T) {
 func TestNegotiatedStatusFailsWhenEffectiveModeCannotResolve(t *testing.T) {
 	home := reviewModeHome(t)
 	repo := initReviewCLIRepo(t)
-	if err := os.WriteFile(filepath.Join(repo, "tracked.txt"), []byte("changed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(filepath.Join(home, ".gentle-ai"), 0o755); err != nil {
 		t.Fatal(err)
 	}
