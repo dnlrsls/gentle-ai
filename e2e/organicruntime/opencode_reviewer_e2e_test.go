@@ -294,10 +294,7 @@ func TestRealOpenCodeReviewerOrdinarySessionInjectsFrozenContextAndAdmitsRawOutp
 	}
 }
 
-// organicCommandArguments parses the command renderer's POSIX shell words
-// before handing argv to harness.gentle. The renderer quotes a Windows CWD
-// containing spaces; passing those quote bytes through to the Go flag parser
-// would turn a valid `--cwd` argument into a different, invalid value.
+// organicCommandArguments removes POSIX shell quoting before passing Windows CWDs to Go flags.
 func organicCommandArguments(t *testing.T, command string) []string {
 	t.Helper()
 	fields, err := organicCommandWords(command)
@@ -309,7 +306,6 @@ func organicCommandArguments(t *testing.T, command string) []string {
 	}
 	return append([]string(nil), fields[1:]...)
 }
-
 func organicCommandWords(command string) ([]string, error) {
 	words := []string{}
 	var word strings.Builder
@@ -339,7 +335,6 @@ func organicCommandWords(command string) ([]string, error) {
 	}
 	return words, nil
 }
-
 func TestOrganicCommandArgumentsPreservesQuotedWindowsCWD(t *testing.T) {
 	arguments := organicCommandArguments(t, "gentle-ai review start --cwd='C:\\Users\\reviewer name\\repo' --contract=gentle-ai.review-integration/v2")
 	want := []string{"review", "start", "--cwd=C:\\Users\\reviewer name\\repo", "--contract=gentle-ai.review-integration/v2"}
@@ -347,15 +342,11 @@ func TestOrganicCommandArgumentsPreservesQuotedWindowsCWD(t *testing.T) {
 		t.Fatalf("argv = %#v, want %#v", arguments, want)
 	}
 	for index, value := range want {
-		if arguments[index] != value {
-			t.Fatalf("argv[%d] = %q, want %q", index, arguments[index], value)
-		}
-		if strings.ContainsAny(arguments[index], "'\"") {
-			t.Fatalf("argv[%d] retains a shell quote: %q", index, arguments[index])
+		if got := arguments[index]; got != value || strings.ContainsAny(got, "'\"") {
+			t.Fatalf("argv[%d] = %q, want unquoted %q", index, got, value)
 		}
 	}
 }
-
 func TestOrganicCommandArgumentsExecuteStartWithWindowsCWD(t *testing.T) {
 	harness := newOrganicHarness(t)
 	spacedWorktree := harness.repo.worktree + " space"
@@ -365,22 +356,26 @@ func TestOrganicCommandArgumentsExecuteStartWithWindowsCWD(t *testing.T) {
 	harness.repo.worktree = spacedWorktree
 	harness.writeFiles(map[string]string{"docs/candidate.md": "candidate\n"})
 	harness.git("commit", "-qm", "test: spaced cwd candidate")
-
 	status := organicNegotiatedStatus(t, harness, "windows-cwd-start")
 	if status.NextTransition == nil || status.NextTransition.Execute == nil || status.NextTransition.Execute.Operation != "review.start" {
 		t.Fatalf("STATUS transition = %#v", status.NextTransition)
 	}
-	if !strings.Contains(status.NextTransition.Execute.Command, pathquote.ShellWord("--cwd="+spacedWorktree)) {
+	publishedCWD := ""
+	for _, argument := range status.NextTransition.Execute.Arguments {
+		if argument.Name == "cwd" {
+			publishedCWD = argument.Value
+			break
+		}
+	}
+	if !strings.Contains(status.NextTransition.Execute.Command, pathquote.ShellWord("--cwd="+publishedCWD)) {
 		t.Fatalf("START command does not safely render the spaced cwd: %q", status.NextTransition.Execute.Command)
 	}
 	arguments := organicCommandArguments(t, status.NextTransition.Execute.Command)
-	if got := organicArgumentValue(arguments, "--cwd"); got != spacedWorktree {
-		t.Fatalf("START argv cwd = %q, want %q (argv %#v)", got, spacedWorktree, arguments)
+	if got := organicArgumentValue(arguments, "--cwd"); got != publishedCWD || strings.ContainsAny(got, "'\"") {
+		t.Fatalf("START argv cwd = %q, want unquoted %q (argv %#v)", got, publishedCWD, arguments)
 	}
-	for _, argument := range arguments {
-		if strings.ContainsAny(argument, "'\"") {
-			t.Fatalf("START argv retains a shell quote: %#v", arguments)
-		}
+	if !sameOrganicDirectory(publishedCWD, spacedWorktree) {
+		t.Fatalf("START cwd %q does not identify worktree %q", publishedCWD, spacedWorktree)
 	}
 	harness.gentle(arguments...)
 }
@@ -427,8 +422,9 @@ type organicNegotiatedCollection struct {
 }
 
 type organicNegotiatedExecute struct {
-	Operation string `json:"operation"`
-	Command   string `json:"command"`
+	Operation string                      `json:"operation"`
+	Command   string                      `json:"command"`
+	Arguments []organicNegotiatedArgument `json:"arguments"`
 }
 
 type organicNegotiatedTransition struct {
