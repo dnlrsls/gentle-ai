@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gentleman-programming/gentle-ai/v4/internal/agents"
+	"github.com/gentleman-programming/gentle-ai/v4/internal/agents/codex"
 	"github.com/gentleman-programming/gentle-ai/v4/internal/catalog"
 	"github.com/gentleman-programming/gentle-ai/v4/internal/components/agentguidance"
 	"github.com/gentleman-programming/gentle-ai/v4/internal/components/communitytool"
@@ -36,6 +37,10 @@ func TestRenderedGuidanceHasNoRetiredWorkflowReferences(t *testing.T) {
 			continue // Catalog-only: no standalone guidance target.
 		}
 		t.Run(string(agent.ID), func(t *testing.T) {
+			if agent.ID == model.AgentCodex {
+				// Rendering coverage must not depend on an installed Codex CLI.
+				t.Cleanup(codex.SetRuntimeVersionCommandForTest("codex-cli 0.144.0", nil))
+			}
 			adapter, err := agents.NewAdapter(agent.ID)
 			if err != nil {
 				t.Fatal(err)

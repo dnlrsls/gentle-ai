@@ -1839,6 +1839,9 @@ func TestManagedAgentBackupPathsOmitPromptsBehindSymlinkedRuntimeDirs(t *testing
 // created. Files outside the known paths are not part of the snapshot and stay.
 func TestClaudePilotSnapshotRestoreRemovesModulePilot(t *testing.T) {
 	home := t.TempDir()
+	// GGA resolves its Windows config from APPDATA rather than homeDir.
+	// Keep every snapshot path in the fixture instead of touching host data.
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
 	if err := state.Write(home, state.InstallState{InstalledAgents: []string{string(model.AgentClaudeCode)}}); err != nil {
 		t.Fatalf("state.Write: %v", err)
 	}
@@ -1852,7 +1855,14 @@ func TestClaudePilotSnapshotRestoreRemovesModulePilot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	manifest, err := backup.NewSnapshotter().Create(filepath.Join(t.TempDir(), "snapshot"), configPathsForBackup(home))
+	paths := configPathsForBackup(home)
+	for _, path := range paths {
+		rel, err := filepath.Rel(home, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			t.Fatalf("snapshot path %q escapes isolated home: %v", path, err)
+		}
+	}
+	manifest, err := backup.NewSnapshotter().Create(filepath.Join(t.TempDir(), "snapshot"), paths)
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}

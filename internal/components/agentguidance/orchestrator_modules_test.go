@@ -3,7 +3,9 @@ package agentguidance
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -211,6 +213,24 @@ func TestOrchestratorModuleCoreKeepsCriticalPolicy(t *testing.T) {
 	}
 }
 
+func TestBuildOrchestratorModulesAcceptsNativeAbsoluteBindings(t *testing.T) {
+	dirs := []string{filepath.Join(t.TempDir(), ".claude", "gentle-ai", "orchestrator"), testModuleDir, "/home/example/.claude/gentle-ai/orchestrator"}
+	if runtime.GOOS == "windows" {
+		dirs = append(dirs, `C:\Users\example\.claude\gentle-ai\orchestrator`, `\\server\share\.claude\gentle-ai\orchestrator`)
+	}
+	for _, dir := range dirs {
+		t.Run(dir, func(t *testing.T) {
+			bundle, err := buildOrchestratorModules(model.AgentClaudeCode, fakeModuleContract, dir)
+			if err != nil {
+				t.Fatalf("build with absolute/home-relative binding: %v", err)
+			}
+			if len(bundle.modules) == 0 || !strings.Contains(bundle.core, dir) {
+				t.Fatal("bundle must retain the exact directory binding in its pointers")
+			}
+		})
+	}
+}
+
 func TestBuildOrchestratorModulesRejectsUnsupportedBindings(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -227,6 +247,10 @@ func TestBuildOrchestratorModulesRejectsUnsupportedBindings(t *testing.T) {
 		{"import binding", model.AgentClaudeCode, "@~/.claude/gentle-ai/orchestrator", errInvalidOrchestratorModuleDir},
 		{"multiline binding", model.AgentClaudeCode, "~/.claude\n/orchestrator", errInvalidOrchestratorModuleDir},
 		{"backtick binding", model.AgentClaudeCode, "~/.claude/`x`", errInvalidOrchestratorModuleDir},
+		{"leading whitespace", model.AgentClaudeCode, " " + testModuleDir, errInvalidOrchestratorModuleDir},
+		{"trailing whitespace", model.AgentClaudeCode, testModuleDir + " ", errInvalidOrchestratorModuleDir},
+		{"drive-relative binding", model.AgentClaudeCode, `C:.claude\gentle-ai\orchestrator`, errInvalidOrchestratorModuleDir},
+		{"root-relative binding", model.AgentClaudeCode, `\.claude\gentle-ai\orchestrator`, errInvalidOrchestratorModuleDir},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bundle, err := buildOrchestratorModules(tc.agent, fakeModuleContract, tc.dir)

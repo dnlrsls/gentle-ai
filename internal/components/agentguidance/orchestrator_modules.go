@@ -3,6 +3,7 @@ package agentguidance
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -86,7 +87,7 @@ func validateOrchestratorModuleDir(dir string) error {
 		return fmt.Errorf("%w: empty", errInvalidOrchestratorModuleDir)
 	case dir != strings.TrimSpace(dir) || strings.ContainsAny(dir, "\r\n`"):
 		return fmt.Errorf("%w: %q cannot be quoted on one pointer line", errInvalidOrchestratorModuleDir, dir)
-	case !strings.HasPrefix(dir, "~/") && !strings.HasPrefix(dir, "/"):
+	case !strings.HasPrefix(dir, "~/") && !strings.HasPrefix(dir, "/") && !filepath.IsAbs(dir):
 		return fmt.Errorf("%w: %q is not a user-global path", errInvalidOrchestratorModuleDir, dir)
 	}
 	return nil

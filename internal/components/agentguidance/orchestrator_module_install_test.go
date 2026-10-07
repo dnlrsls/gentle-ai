@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -64,8 +65,13 @@ func assertModuleFile(t *testing.T, path, want string, mode fs.FileMode) {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	info, err := os.Lstat(path)
-	if err != nil || string(data) != want || info.Mode() != mode {
-		t.Fatalf("%s = %q mode %v (%v), want %q mode %v", path, data, info.Mode(), err, want, mode)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	// Windows does not expose Unix permission bits; bytes and file type must
+	// still match, while Unix retains the exact permission assertion.
+	if string(data) != want || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode() != mode) {
+		t.Fatalf("%s = %q mode %v, want %q mode %v", path, data, info.Mode(), want, mode)
 	}
 }
 
@@ -154,7 +160,7 @@ func TestOrchestratorModuleInstallStagesThenFinalizesLedger(t *testing.T) {
 				assertModuleFile(t, filepath.Join(dir, module.file), module.content, 0o644)
 			}
 			for _, created := range []string{filepath.Dir(dir), dir} {
-				if info, err := os.Lstat(created); err != nil || !info.IsDir() || info.Mode().Perm()&^0o700 != 0 {
+				if info, err := os.Lstat(created); err != nil || !info.IsDir() || (runtime.GOOS != "windows" && info.Mode().Perm()&^0o700 != 0) {
 					t.Fatalf("created directory %s = %v (%v), want private directory", created, info, err)
 				}
 			}

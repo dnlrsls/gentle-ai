@@ -44,6 +44,40 @@ func TestClaudeModuleDeliveryPlansEveryPathBeforeWriting(t *testing.T) {
 	}
 }
 
+func TestClaudeModuleDeliveryNativeAbsoluteHome(t *testing.T) {
+	home := t.TempDir()
+	options := RoutingOptions{ClaudeGlobalModules: true, ReviewContract: fakeModuleContract}
+	before := snapshotModuleTree(t, home)
+	paths, err := RoutingPathsWithOptions(home, model.AgentClaudeCode, options)
+	if err != nil || len(paths) != 9 {
+		t.Fatalf("planning = %v, %v; want nine paths", paths, err)
+	}
+	if !reflect.DeepEqual(before, snapshotModuleTree(t, home)) {
+		t.Fatal("planning changed the fixture")
+	}
+	result, err := InjectRoutingWithOptions(home, model.AgentClaudeCode, options)
+	if err != nil || !result.Changed || len(result.Files) != 5 {
+		t.Fatalf("inject = %+v, %v; want core, three modules and ledger", result, err)
+	}
+	for _, path := range result.Files {
+		if !slices.Contains(paths, path) {
+			t.Fatalf("unplanned write: %q", path)
+		}
+		if data, err := os.ReadFile(path); err != nil || len(data) == 0 {
+			t.Fatalf("delivered file %q is empty or unreadable: %v", path, err)
+		}
+	}
+	core, err := os.ReadFile(filepath.Join(home, ".claude", "CLAUDE.md"))
+	if err != nil || !strings.Contains(string(core), filepath.Join(home, ".claude", "gentle-ai", "orchestrator")) {
+		t.Fatalf("core lacks native module directory: %v", err)
+	}
+	after := snapshotModuleTree(t, home)
+	again, err := InjectRoutingWithOptions(home, model.AgentClaudeCode, options)
+	if err != nil || again.Changed || !reflect.DeepEqual(after, snapshotModuleTree(t, home)) {
+		t.Fatalf("second inject changed delivery: %+v, %v", again, err)
+	}
+}
+
 func TestClaudeModuleDeliveryInjectsCoreModulesAndLedger(t *testing.T) {
 	home := t.TempDir()
 	configDir := filepath.Join(home, ".claude")
@@ -87,8 +121,19 @@ func TestClaudeModuleDeliveryInjectsCoreModulesAndLedger(t *testing.T) {
 	}
 	for _, module := range bundle.modules {
 		path := filepath.Join(moduleDir, module.file)
-		if !strings.Contains(core, "`"+path+"`") {
+		var pointer string
+		for i, quoted := range strings.Split(core, "`") {
+			if i%2 == 1 && filepath.Clean(quoted) == filepath.Clean(path) {
+				pointer = quoted
+			}
+		}
+		if pointer == "" {
 			t.Fatalf("core has no pointer to %s", path)
+		}
+		// Read the emitted pointer verbatim: mixed separators must resolve to
+		// the installed file, not merely pass a normalized string comparison.
+		if data, err := os.ReadFile(pointer); err != nil || string(data) != module.content {
+			t.Fatalf("pointer %q does not load the installed module: %v", pointer, err)
 		}
 		assertModuleFile(t, path, module.content, 0o644)
 	}

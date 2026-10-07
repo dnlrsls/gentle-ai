@@ -384,7 +384,7 @@ gentle-ai -v
 | `--channel`                   | Release channel: `stable` (default), `beta`, or `nightly` (alias for `beta`). Also settable via `GENTLE_AI_CHANNEL`. |
 | `--opencode-background-subagents` | OpenCode background subagents: `auto`, `on`, or `off`. Also settable via `GENTLE_AI_OPENCODE_BACKGROUND_SUBAGENTS`. See [below](#background-subagent-flags). |
 | `--pi-background-subagents`   | Pi background-subagent policy projected for `gentle-pi`: `auto`, `on`, or `off`. Also settable via `GENTLE_AI_PI_BACKGROUND_SUBAGENTS`. |
-| `--claude-orchestrator-modules` | Global Claude Code only: install the orchestrator as an always-loaded core plus on-demand modules in `~/.claude/gentle-ai/orchestrator/`. Off by default; rejected with `--scope workspace` or without `claude-code` in the selection. Sync, uninstall and restore limits: [Claude Code orchestrator modules](rollback.md#claude-code-orchestrator-modules-pilot). |
+| `--claude-orchestrator-modules` | Global Claude Code only: install the orchestrator as an always-loaded core plus on-demand modules in `~/.claude/gentle-ai/orchestrator/`. Module pointers support native absolute paths, including Windows drive-absolute and UNC paths; drive-relative (`C:path`) and volume-less backslash-rooted (`\path`) Windows bindings are rejected. Off by default; rejected with `--scope workspace` or without `claude-code` in the selection. Sync, uninstall and restore limits: [Claude Code orchestrator modules](rollback.md#claude-code-orchestrator-modules-pilot). |
 | `--dry-run`                   | Preview the install plan without applying changes                                                                 |
 
 ## CLI Flags (sync)
